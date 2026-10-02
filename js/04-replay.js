@@ -1,0 +1,430 @@
+'use strict';
+/*! Stage 模擬器 — IPSC Action Air stage 規劃、回放與檢討
+ *  Copyright (C) 2026 James
+ *  SPDX-License-Identifier: GPL-3.0-or-later
+ *  本程式為自由軟體：你可以依自由軟體基金會發布的 GNU 通用公共授權條款第 3 版，
+ *  或（由你選擇）任何更新的版本，重新散布或修改本程式。本程式不提供任何保證，
+ *  亦不保證適售性或特定目的適用性。完整條款見 LICENSE 或 <https://www.gnu.org/licenses/>。
+ */
+/* ---------- phase 3b: replay & sound ---------- */
+const BB_SPEED = 90;   // m/s, approximate Action Air BB velocity (estimate) used for the steel "ding" delay
+const RP = {on:false, playing:false, t:0, speed:1, total:0, sound:true, random:false, res:null, plan:null, stops:[], outcomes:[], fallT:{}, act:{}, lastWall:0, pre:null, raf:0};
+let AC = null;
+function audio(){ if(!AC){ try{ AC = new (window.AudioContext || window.webkitAudioContext)(); }catch(e){ AC = null; } } if(AC && AC.state === 'suspended') AC.resume(); return AC; }
+function sndBeep(){ const a = audio(); if(!a) return; const o = a.createOscillator(), g = a.createGain(); o.type = 'square'; o.frequency.value = 2900; g.gain.setValueAtTime(0.0001, a.currentTime); g.gain.exponentialRampToValueAtTime(0.25, a.currentTime + 0.01); g.gain.setValueAtTime(0.25, a.currentTime + 0.33); g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + 0.36); o.connect(g).connect(a.destination); o.start(); o.stop(a.currentTime + 0.4); }
+function noiseBuf(a, dur){ const b = a.createBuffer(1, Math.max(1, Math.floor(a.sampleRate * dur)), a.sampleRate), d = b.getChannelData(0); for(let i = 0; i < d.length; i++) d[i] = Math.random()*2 - 1; return b; }
+function sndShot(){
+  const a = audio(); if(!a) return; const t = a.currentTime;
+  const n = a.createBufferSource(); n.buffer = noiseBuf(a, 0.12);
+  const f = a.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1400; f.Q.value = 0.8;
+  const g = a.createGain(); g.gain.setValueAtTime(0.6, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+  n.connect(f).connect(g).connect(a.destination); n.start(t);
+  // slide cycling click
+  const c = a.createBufferSource(); c.buffer = noiseBuf(a, 0.03); const hp = a.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3000;
+  const g2 = a.createGain(); g2.gain.setValueAtTime(0.25, t + 0.03); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+  c.connect(hp).connect(g2).connect(a.destination); c.start(t + 0.03);
+}
+function sndDing(stop){
+  const a = audio(); if(!a) return; const t = a.currentTime;
+  (stop ? [1500, 2350, 3900] : [1900, 2760, 4200]).forEach((fq, i) => {
+    const o = a.createOscillator(), g = a.createGain(); o.type = 'sine'; o.frequency.value = fq;
+    g.gain.setValueAtTime(0.18 / (i + 1), t); g.gain.exponentialRampToValueAtTime(0.0005, t + (stop ? 0.9 : 0.5));
+    o.connect(g).connect(a.destination); o.start(t); o.stop(t + 1);
+  });
+}
+function sndClick(n){ const a = audio(); if(!a) return; for(let i = 0; i < (n || 2); i++){ const t = a.currentTime + i*0.12; const s = a.createBufferSource(); s.buffer = noiseBuf(a, 0.02); const g = a.createGain(); g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.02); s.connect(g).connect(a.destination); s.start(t); } }
+function sndPaper(){ const a = audio(); if(!a) return; const t = a.currentTime, s = a.createBufferSource(); s.buffer = noiseBuf(a, 0.03); const f = a.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 900; const g = a.createGain(); g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.03); s.connect(f).connect(g).connect(a.destination); s.start(t); }
+function say(txt){ try{ const u = new SpeechSynthesisUtterance(txt); u.lang = 'en-US'; u.rate = 1; speechSynthesis.speak(u); }catch(e){} }
+// speak, then call cb when the voice has finished (with fallbacks when the device has no voice or never reports the end)
+function sayThen(txt, cb){
+  let done = false, started = false; const fin = () => { if(!done){ done = true; cb(); } };
+  const est = 0.6 + txt.length * 0.07;
+  try{
+    if(!('speechSynthesis' in window)) throw new Error('no speech');
+    const u = new SpeechSynthesisUtterance(txt); u.lang = 'en-US'; u.rate = 1;
+    u.onstart = () => { started = true; setTimeout(fin, (est + 2) * 1000); };
+    u.onend = fin; u.onerror = fin;
+    speechSynthesis.speak(u);
+  }catch(e){ setTimeout(fin, est * 1000); return; }
+  setTimeout(() => { if(!started) fin(); }, 2000);   // no voice on this device: go on after 2 s
+}
+const RHYTHM_READY_PAUSE = 0.6;          // seconds between the end of "Are you ready?" and "Standby"
+const RHYTHM_DELAY = [0.5, 2];             // random gap between the end of "Standby" and the start beep
+
+function rng(seed){ let x = seed | 0 || 1; return () => { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; return ((x >>> 0) % 100000) / 100000; }; }
+function startReplay(opts){
+  const plan = replayPlanOverride || activePlan(); if(!plan){ alert('請先建立路線計畫。'); return; }
+  const R = computePlan(plan); planCache = null;
+  if(!R.shots.length){ alert('計畫中沒有任何一槍。'); return; }
+  const T = PROFILE.time, start = startObj();
+  // movement windows per stop
+  const stops = []; let prev = start ? [start.x, start.y] : [plan.stops[0].x, plan.stops[0].y];
+  plan.stops.forEach((st, k) => {
+    const d = Math.hypot(st.x - prev[0], st.y - prev[1]);
+    const lastPrev = k > 0 ? Math.max(0, ...R.shots.filter(x => x.stop === k - 1).map(x => x.t)) : 0;
+    const dep = k === 0 ? 0 : lastPrev + T.exitT;
+    const arr = d > 0.3 ? dep + T.startCost + d / effSpeed(prev, [st.x, st.y]) : dep;
+    stops.push({from:prev.slice(), to:[st.x, st.y], dep, arr, stance:st.stance || 'stand', postT:PROFILE.postures[st.stance || 'stand']?.t || 0, reload:st.reload});
+    prev = [st.x, st.y];
+  });
+  // outcome of every shot
+  const r = rng(opts && opts.seed || 12345);
+  const outcomes = R.shots.map(x => {
+    if(!RP.random || !x.scored) return x.steel ? 'hit' : 'A';
+    const u = r();
+    if(x.steel) return u < x.pS ? 'hit' : 'miss';
+    const h = x.hd; return u < h.A ? 'A' : u < h.A + h.C ? 'C' : u < h.A + h.C + h.D ? 'D' : u < h.A + h.C + h.D + h.M ? 'M' : 'NS';
+  });
+  const fallT = {};
+  R.shots.forEach((x, i) => { const o = getObj(x.target); if(!o || !x.steel) return; if(outcomes[i] === 'hit' && fallT[o.id] == null) fallT[o.id] = x.t + Math.hypot(o.x - plan.stops[x.stop].x, o.y - plan.stops[x.stop].y) / BB_SPEED; });
+  Object.assign(RP, {on:true, playing:false, t:0, total:R.total + 1.5, res:R, plan, stops, outcomes, fallT, pre:null, cmp:null, rl:reloadWindows(R, stops),
+    seed:opts && opts.seed || 12345, srcPlanId:activePlan() ? activePlan().id : null, layout:replayLayoutKey()});
+  if(RP.cmpId){ const cp = plans().find(p => p.id === RP.cmpId && p.id !== plan.id); if(cp){ RP.cmp = buildRun(cp); RP.total = Math.max(RP.total, RP.cmp.res.total + 1.5); } }
+  RP.act = replayActivations();
+  if(leftTab !== '3d') setLeftTab('3d');
+  refresh3dModes(); syncReplayUI(); render3d();
+}
+function buildRun(plan){
+  // movement windows of a second plan for side-by-side replay
+  const R = computePlan(plan); planCache = null;
+  const T = PROFILE.time, start = startObj(), stops = [];
+  let prev = start ? [start.x, start.y] : [plan.stops[0].x, plan.stops[0].y];
+  plan.stops.forEach((st, k) => {
+    const d = Math.hypot(st.x - prev[0], st.y - prev[1]);
+    const lastPrev = k > 0 ? Math.max(0, ...R.shots.filter(x => x.stop === k - 1).map(x => x.t)) : 0;
+    const dep = k === 0 ? 0 : lastPrev + T.exitT, arr = d > 0.3 ? dep + T.startCost + d / effSpeed(prev, [st.x, st.y]) : dep;
+    stops.push({from:prev.slice(), to:[st.x, st.y], dep, arr, stance:st.stance || 'stand', postT:PROFILE.postures[st.stance || 'stand']?.t || 0, reload:st.reload});
+    prev = [st.x, st.y];
+  });
+  return {plan, res:R, stops, rl:reloadWindows(R, stops)};
+}
+function withRun(run, fn){ const bs = RP.stops, br = RP.res, bp = RP.plan, bl = RP.rl; RP.stops = run.stops; RP.res = run.res; RP.plan = run.plan; RP.rl = run.rl; try{ return fn(); } finally { RP.stops = bs; RP.res = br; RP.plan = bp; RP.rl = bl; } }
+function effSpeed(a, b){
+  const T = PROFILE.time, d = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+  if(!(PROFILE.body && PROFILE.body.lateral3m)) return T.speed;
+  const dd = downDir(), sAng = Math.abs(((b[0] - a[0])*dd[1] - (b[1] - a[1])*dd[0]) / d), vl = 3 / Math.max(0.3, PROFILE.body.lateral3m - T.startCost);
+  return 1 / ((1 - sAng) / T.speed + sAng / vl);
+}
+// aim direction during replay: rotates from the previous target to the next one over the modelled transition (accelerate, then settle)
+function aimDirAt(t, p){
+  const shots = RP.res.shots, j = shots.findIndex(x => x.t >= t - 0.02);
+  if(j < 0) return null;
+  const nx = shots[j], on = getObj(nx.target); if(!on) return null;
+  const to = Math.atan2(on.y - p[1], on.x - p[0]);
+  const pv = j > 0 ? shots[j - 1] : null;
+  if(!pv || pv.stop !== nx.stop || pv.target === nx.target) return to;
+  const op = getObj(pv.target); if(!op) return to;
+  const from = Math.atan2(op.y - p[1], op.x - p[0]);
+  const settle = PROFILE.body ? PROFILE.body.settle : 0.12, dur = Math.max(0.05, nx.dt - settle);
+  let u = Math.max(0, Math.min(1, (t - pv.t) / dur)); u = u*u*(3 - 2*u);
+  let dA = to - from; while(dA > Math.PI) dA -= 2*Math.PI; while(dA < -Math.PI) dA += 2*Math.PI;
+  return from + dA * u;
+}
+function figPos(t){
+  const S = RP.stops; if(!S.length) return [0, 0];
+  for(let k = 0; k < S.length; k++){
+    const s = S[k];
+    if(t < s.dep) return s.from;
+    if(t <= s.arr){ const u = (t - s.dep) / Math.max(1e-6, s.arr - s.dep), e = u*u*(3 - 2*u); return [s.from[0] + (s.to[0] - s.from[0])*e, s.from[1] + (s.to[1] - s.from[1])*e]; }
+    if(k === S.length - 1 || t < S[k+1].dep) return s.to;
+  }
+  return S[S.length - 1].to;
+}
+function stopAt(t){ const S = RP.stops; for(let k = S.length - 1; k >= 0; k--) if(t >= S[k].arr) return (k === S.length - 1 || t < S[k+1].dep) ? k : -1; return -1; }
+function figEye(t){
+  const k = stopAt(t), stand = postureEye('stand'); if(k < 0) return stand;
+  const s = RP.stops[k]; if(s.stance === 'stand') return stand;
+  const u = Math.min(1, (t - s.arr) / Math.max(0.2, s.postT)); return stand + (postureEye(s.stance) - stand) * u;
+}
+function replayActivations(){
+  // when does each activator fire? steel: when it falls; triggers: when the figure first passes within 0.6 m
+  const act = {};
+  stage.objects.forEach(o => {
+    if(RP.fallT[o.id] != null) act[o.id] = RP.fallT[o.id];
+    if(o.type === 'trigger'){ for(let t = 0; t <= RP.total; t += 0.05){ const p = figPos(t); if(Math.hypot(p[0] - o.x, p[1] - o.y) < 0.6){ act[o.id] = t; break; } } }
+    if(o.type === 'paper'){ const sh = RP.res.shots.find(x => x.target === o.id); if(sh) act[o.id] = sh.t; }
+  });
+  return act;
+}
+function mechActTime(o){ const m = o.mech; if(!m || m.act.mode === 'none') return null; if(m.act.mode === 'start') return 0; const a = RP.act[m.act.id]; return a == null ? null : a + (m.act.delay || 0); }
+// pose of an object at replay time: moved copy, fallen flag, or null when hidden
+function replayPose(o){
+  if(!RP.on) return o;
+  const t = RP.t;
+  if((o.type === 'popper' || o.type === 'plate' || o.type === 'stopplate') && RP.fallT[o.id] != null && t >= RP.fallT[o.id]) return Object.assign({}, o, {fallen:Math.min(1, (t - RP.fallT[o.id]) / 0.25)});
+  const host = o.type === 'noshoot' && o.cover ? getObj(o.cover) : o;
+  if(!host || !isMech(host)) return o;
+  const m = host.mech, A = mechActTime(host);
+  const vis = A == null ? m.preVisible : (t < A ? m.preVisible : (t >= A + (m.winFrom || 0) && (m.winTo == null || t <= A + m.winTo)) || (m.preVisible && t < A + (m.winFrom || 0) && m.type === 'swinger'));
+  if(!vis && m.type !== 'swinger' && m.type !== 'slider') return null;
+  let dx = 0, dy = 0;
+  if(A != null && t >= A){
+    if(m.type === 'swinger'){ const f = facing(host.rot), p = [-f[1], f[0]], per = m.period || 1.2, L = 0.6 * Math.sin(rad((m.amp || 90) / 2)) * Math.exp(-(t - A) / 8); const off = L * Math.sin(Math.PI * (t - A) / per); dx = p[0]*off; dy = p[1]*off; }
+    if(m.type === 'slider' && m.ex != null){ const u = Math.min(1, (t - A) / (m.travel || 2)); dx = (m.ex - host.x)*u; dy = (m.ey - host.y)*u; }
+  }
+  return Object.assign({}, o, {x:o.x + dx, y:o.y + dy});
+}
+// reload windows [a, b] in replay time, from the model's reload log
+function reloadWindows(R, stops){
+  const T = PROFILE.time, out = [];
+  (R.reloadLog || []).forEach(r => {
+    if(r.forced){ const s = R.shots[r.shot]; if(s) out.push({a:s.t - s.dt, b:s.t - s.dt + r.extra, stop:r.stop}); }
+    else if(r.moving){ const st = stops[r.stop]; if(st) out.push({a:st.dep, b:st.dep + Math.max(0.3, T.reloadMove), stop:r.stop, moving:true}); }
+    else { const s = R.shots.find(x => x.stop === r.stop); if(s){ const a = s.t - s.dt + (s.parts.move || 0); out.push({a, b:a + r.extra, stop:r.stop}); } }
+  });
+  return out;
+}
+function tgtCenterZ(o){
+  if(!o) return 1.2;
+  if(o.type === 'paper' || o.type === 'noshoot'){ const g = paperGeom(o); return (g.top + g.bottom) / 2; }
+  if(o.type === 'popper'){ const sp = o.mini ? RULE_SPECS.miniPopper : RULE_SPECS.popper; return sp.h - sp.headD / 2; }
+  return o.cy != null ? o.cy : stage.plateCy;
+}
+// floor path, stop discs and reload markers of the plan (replay, or the active plan when "show route" is on)
+function planPath3d(floor, labels){
+  const plan = RP.on ? RP.plan : activePlan(); if(!plan || !plan.stops.length) return;
+  if(!RP.on && !($('planShow') && $('planShow').checked)) return;
+  const R = RP.on ? RP.res : planResult(plan), start = startObj();
+  const pts = (start ? [[start.x, start.y]] : []).concat(plan.stops.map(s => [s.x, s.y]));
+  for(let i = 1; i < pts.length; i++) floor.push({line:[[pts[i-1][0], pts[i-1][1], 0.012], [pts[i][0], pts[i][1], 0.012]], stroke:'rgba(31,110,140,.7)', wlw:0.05});
+  plan.stops.forEach((s, k) => {
+    floor.push({pts:circlePts(s.x, s.y, 0.22, 20).map(q => [q[0], q[1], 0.011]), fill:'rgba(31,110,140,.16)', stroke:'#1F6E8C', lw:1.5});
+    labels.push({p:[s.x, s.y, 0.04], t:'S' + (k + 1), c:'#1F6E8C', pri:1});
+  });
+  (R.reloadLog || []).forEach(r => {
+    const st = plan.stops[r.stop]; if(!st) return;
+    const pv = r.stop === 0 ? (start ? [start.x, start.y] : [st.x, st.y]) : [plan.stops[r.stop - 1].x, plan.stops[r.stop - 1].y];
+    const at = r.forced || !r.moving ? [st.x + 0.4, st.y] : [(pv[0] + st.x) / 2, (pv[1] + st.y) / 2];
+    floor.push({pts:circlePts(at[0], at[1], 0.12, 14).map(q => [q[0], q[1], 0.014]), fill:'#F0A020', stroke:'#8A4F00', lw:1});
+    labels.push({p:[at[0], at[1], 0.12], t:'換匣', c:'#8A4F00'});
+  });
+}
+function replayFigure(faces, labels, colOverride, tag){
+  const t = RP.t, p = figPos(t), eye = figEye(t), stand = postureEye('stand');
+  const shots = RP.res.shots; let aim = null, aimObj = null;
+  const nxt = shots.find(x => x.t >= t - 0.12);
+  const k = stopAt(t);
+  if(nxt && k >= 0 && nxt.stop === k){ aimObj = getObj(nxt.target); if(aimObj) aim = [aimObj.x, aimObj.y]; }
+  const mv = RP.stops.find(s => t > s.dep && t < s.arr);
+  let dir;
+  const aA = aim ? aimDirAt(t, p) : null;
+  if(aA != null) dir = [Math.cos(aA), Math.sin(aA)];
+  else if(aim) dir = [aim[0] - p[0], aim[1] - p[1]];
+  else dir = mv ? [mv.to[0] - mv.from[0], mv.to[1] - mv.from[1]] : downDir();
+  const L = Math.hypot(dir[0], dir[1]) || 1; dir = [dir[0]/L, dir[1]/L];
+  const side = [dir[1], -dir[0]];                                   // shooter's right
+  const hs = PROFILE.body && PROFILE.body.hand === 'left' ? -1 : 1;  // gun-hand side
+  const col = colOverride || '#1F4E8C', skin = '#E6BE98', dark = '#20262E';
+  const P = (fw, sd, z) => [p[0] + dir[0]*fw + side[0]*sd, p[1] + dir[1]*fw + side[1]*sd, z];
+  const add = (a, b, w) => [a[0] + b[0]*w, a[1] + b[1]*w, a[2] + b[2]*w];
+  const mix = (a, b, u) => [a[0] + (b[0] - a[0])*u, a[1] + (b[1] - a[1])*u, a[2] + (b[2] - a[2])*u];
+  const limb = (a, b, w, c) => faces.push({line:[a, b], stroke:c || col, wlw:w, bias:-0.3});
+  const ball = (q, r, c) => faces.push({dot:q, fill:c || col, wr:r, bias:-0.32});
+  const rlw = (RP.rl || []).find(w => t >= w.a && t <= w.b);
+  const first = shots[0], sc = stage.startCond || {};
+  const drawEnd = first ? Math.max(0.3, first.t - first.dt + (first.parts.move || 0) + Math.max(0.2, (first.parts.shoot || 0) - 0.08)) : 0;
+  const drawing = first && t < drawEnd;
+  const shotNow = shots.some(x => t >= x.t && t - x.t < 0.05);
+  // gun direction toward the target, including height
+  const gunDir = (hand, pitchDeg) => {
+    if(pitchDeg == null && aimObj){ const tz = tgtCenterZ(aimObj), hd = Math.hypot(aimObj.x - hand[0], aimObj.y - hand[1]) || 1, a = Math.atan2(tz - hand[2], hd); return [dir[0]*Math.cos(a), dir[1]*Math.cos(a), Math.sin(a)]; }
+    const a = (pitchDeg || 0) * Math.PI / 180; return [dir[0]*Math.cos(a), dir[1]*Math.cos(a), Math.sin(a)];
+  };
+  const arm = (sh, hand, out) => { const m = mix(sh, hand, 0.5), el = [m[0] + side[0]*0.07*out, m[1] + side[1]*0.07*out, m[2] - 0.07]; limb(sh, el, 0.085); limb(el, hand, 0.075); ball(hand, 0.045, skin); };
+  let muzzle = null;
+  if(eye < 0.5){
+    // prone
+    const head = P(0.12, 0, 0.2), sh = P(0, 0, 0.18), hip = P(-0.7, 0, 0.14);
+    limb(hip, sh, 0.3); ball(head, 0.11, skin);
+    limb(hip, P(-1.5, 0.2, 0.07), 0.12); limb(hip, P(-1.5, -0.2, 0.07), 0.12);
+    const hand = P(0.55, 0, 0.24); arm(P(0, 0.2, 0.18), hand, 1); arm(P(0, -0.2, 0.18), hand, -1);
+    const gd = gunDir(hand, aimObj ? null : 0); muzzle = add(hand, gd, 0.2); limb(hand, muzzle, 0.045, dark);
+  }else{
+    const drop = Math.max(0, stand - eye), kneel = eye <= postureEye('kneel') + 0.05;
+    const hipZ = kneel ? 0.62 : Math.max(0.5, 0.53*stand - drop*0.95);
+    const lean = mv ? 0.14 : 0.06, shZ = eye - 0.2;
+    const hip = P(-0.03, 0, hipZ), shC = P(lean, 0, shZ);
+    // legs
+    const leg = (hp, knee, foot) => { limb(hp, knee, 0.13); limb(knee, foot, 0.1); limb(foot, add(foot, [dir[0], dir[1], 0], 0.17), 0.08, dark); };
+    const hpR = P(-0.03, 0.1, hipZ), hpL = P(-0.03, -0.1, hipZ);
+    if(kneel){ leg(hpR, P(-0.05, 0.12*hs, 0.06), P(-0.45, 0.12*hs, 0.05)); leg(hpL, P(0.38, -0.12*hs, 0.5), P(0.4, -0.12*hs, 0.01)); }
+    else if(mv){
+      const d = Math.hypot(p[0] - mv.from[0], p[1] - mv.from[1]), a = Math.sin(d / 0.6 * Math.PI);
+      const fR = P(0.34*a, 0.11, 0.02 + Math.max(0, -a)*0.14), fL = P(-0.34*a, -0.11, 0.02 + Math.max(0, a)*0.14);
+      leg(hpR, add(mix(hpR, fR, 0.5), [dir[0], dir[1], 0], 0.12), fR); leg(hpL, add(mix(hpL, fL, 0.5), [dir[0], dir[1], 0], 0.12), fL);
+    }else{
+      const kf = Math.min(0.32, drop*0.8);
+      leg(hpR, P(0.05 + kf, 0.15, hipZ*0.5 + 0.04), P(0.05, 0.17, 0.01)); leg(hpL, P(0.05 + kf, -0.15, hipZ*0.5 + 0.04), P(0.05, -0.17, 0.01));
+    }
+    // torso and head
+    limb(P(-0.03, -0.11, hipZ), P(-0.03, 0.11, hipZ), 0.16);
+    limb(hip, shC, 0.3); limb(P(lean, -0.19, shZ), P(lean, 0.19, shZ), 0.12);
+    limb(shC, P(lean + 0.01, 0, eye - 0.08), 0.09, skin);
+    ball(P(lean + 0.02, 0, eye + 0.02), 0.11, skin);
+    ball(P(lean - 0.005, 0, eye + 0.07), 0.1, dark);   // hair or cap
+    // arms and gun
+    const shG = P(lean, 0.19*hs, shZ), shS = P(lean, -0.19*hs, shZ);
+    const aimH = P(lean + 0.52, 0, eye - 0.13), lowH = P(lean + 0.3, 0.04*hs, eye - 0.45), holster = P(-0.02, 0.24*hs, hipZ + 0.02);
+    let gH, sH, gd, magAt = null, gunShown = true;
+    if(drawing){
+      const u0 = sc.hands === 'wrists' ? 0.12 : 0.08, u = Math.max(0, Math.min(1, (t - u0) / Math.max(0.2, drawEnd - u0)));
+      const rest = sc.hands === 'wrists' ? P(lean - 0.05, 0.3*hs, eye + 0.12) : P(0, 0.26*hs, hipZ - 0.05);
+      const restS = sc.hands === 'wrists' ? P(lean - 0.05, -0.3*hs, eye + 0.12) : P(0, -0.26*hs, hipZ - 0.05);
+      const pick = sc.gunLoc && sc.gunLoc !== 'holster';
+      gH = u < 0.35 ? mix(rest, pick ? P(0.35, 0.1*hs, 0.8) : holster, u / 0.35) : mix(pick ? P(0.35, 0.1*hs, 0.8) : holster, aimH, (u - 0.35) / 0.65);
+      sH = u < 0.5 ? mix(restS, P(lean + 0.2, 0, eye - 0.35), u / 0.5) : mix(P(lean + 0.2, 0, eye - 0.35), aimH, (u - 0.5) / 0.5);
+      gd = gunDir(gH, u < 0.35 ? -80 : u < 0.7 ? -25 : null); gunShown = u > 0.25 || !pick;
+      if(!pick && u <= 0.35){ gd = [0, 0, -1]; }
+    }else if(rlw){
+      const u = (t - rlw.a) / Math.max(0.05, rlw.b - rlw.a), pouch = P(-0.05, -0.2*hs, hipZ + 0.06);
+      gH = P(lean + 0.3, 0.02*hs, eye - 0.4); gd = gunDir(gH, 35);
+      sH = u < 0.35 ? mix(gH, pouch, u / 0.35) : u < 0.75 ? mix(pouch, add(gH, [0, 0, -1], 0.07), (u - 0.35) / 0.4) : add(gH, [0, 0, -1], 0.06);
+      if(u >= 0.35 && u < 0.8) magAt = add(sH, [0, 0, 1], 0.04);
+    }else if(aim){ gH = aimH; sH = aimH; gd = gunDir(gH, null); }
+    else { gH = lowH; sH = add(lowH, [-dir[0], -dir[1], 0], 0.03); gd = gunDir(gH, -30); }
+    arm(shG, gH, hs); arm(shS, sH, -hs);
+    if(gunShown){ muzzle = add(gH, gd, 0.2); limb(add(gH, gd, -0.02), muzzle, 0.05, dark); limb(gH, add(gH, [0, 0, -1], 0.08), 0.035, dark); }
+    if(magAt) limb(magAt, add(magAt, [0, 0, 1], 0.1), 0.03, '#555');
+  }
+  if(muzzle && shotNow) ball(muzzle, 0.07, '#F5B324');
+  // tracer to the target just shot
+  if(muzzle) shots.forEach(x => { if(t >= x.t && t - x.t < 0.07){ const o = getObj(x.target); if(o) faces.push({line:[muzzle, [o.x, o.y, tgtCenterZ(o)]], stroke:'rgba(245,179,36,.9)', lw:2, bias:-0.35}); } });
+  labels.push({p:[p[0], p[1], eye + 0.35], t:(tag || ('射手' + (RP.cmp ? '（計畫 ' + RP.plan.name + '）' : ''))) + (rlw ? '・換匣' : ''), c:col, pri:0});
+}
+function replayMarks(faces){
+  const t = RP.t, shots = RP.res.shots;
+  shots.forEach(x => { if(t < x.t || t - x.t > 0.15 || x.steel) return; const o0 = getObj(x.target), o = o0 && replayPose(o0); if(!o) return;
+    const g = paperGeom(o); faces.push({pts:g.oct.map(([u, v]) => { const w = g.toW(u, v); return [w[0] + g.f[0]*0.004, w[1] + g.f[1]*0.004, w[2]]; }), fill:null, stroke:'#FFD23F', lw:4, bias:-0.25}); });
+  shots.forEach((x, i) => {
+    if(x.t > t || x.steel) return;
+    const oc = RP.outcomes[i]; if(oc === 'M') return;
+    const o0 = getObj(x.target); if(!o0) return;
+    const o = replayPose(o0); if(!o) return;
+    const g = paperGeom(o), rr = rng(i * 7919 + 13);
+    let u = 15, v = 12;
+    if(oc === 'A'){ u = 15 + (rr() - 0.5)*5; v = 8 + rr()*10; }
+    if(oc === 'C'){ u = 15 + (rr() < 0.5 ? -1 : 1)*(8 + rr()*3); v = 12 + rr()*12; }
+    if(oc === 'D'){ u = rr() < 0.5 ? 3 : 27; v = 16 + rr()*6; }
+    if(oc === 'NS'){ u = 15 + (rr() - 0.5)*8; v = 30 + rr()*4; }
+    const w = g.toW(u * g.W / 30, v * g.H / 37.5);
+    faces.push({dot:[w[0] + g.f[0]*0.02, w[1] + g.f[1]*0.02, w[2]], fill:oc === 'NS' ? '#C8372D' : '#111', r:3, bias:-0.2});
+  });
+}
+function replayPhase(t){
+  const shots = RP.res.shots, j = shots.findIndex(x => x.t >= t);
+  if(j < 0) return {txt:'完成', col:'#2F7D4F'};
+  const x = shots[j], t0 = x.t - x.dt, u = t - t0;
+  const rw = (RP.rl || []).find(w => t >= w.a && t <= w.b);
+  if(rw) return {txt:'換匣' + (rw.moving ? '（移動中）' : '') + '，剩 ' + fmt(Math.max(0, rw.b - t)) + ' 秒', col:'#D98A00'};
+  if(u < x.parts.move) return {txt:'移動', col:'#6B3FA0'};
+  if(u < x.parts.move + x.parts.wait) return {txt:'等待' + (x.why ? '：' + x.why : ''), col:'#A8641B'};
+  return {txt:'射擊', col:'#2F7D4F'};
+}
+function replayHUD(ctx){
+  const t = RP.t, R = RP.res, shots = R.shots;
+  const done = shots.filter(x => x.t <= t), last = done[done.length - 1];
+  ctx.save(); const hk = Math.max(0.6, Math.min(1, v3d.w / 820)); ctx.scale(hk, hk);
+  ctx.fillStyle = 'rgba(20,28,38,.82)'; ctx.fillRect(10, 10, 270, RP.cmp ? 150 : 104);
+  ctx.fillStyle = '#fff'; ctx.font = '700 30px "Noto Sans TC",monospace'; ctx.fillText(fmt(Math.min(t, R.total)) + ' s', 22, 48);
+  ctx.font = '500 13px "Noto Sans TC",sans-serif';
+  ctx.fillText('第 ' + done.length + ' ／ ' + shots.length + ' 槍' + (last ? '　split ' + fmt(last.dt) : ''), 22, 72);
+  const ph = replayPhase(t); ctx.fillStyle = ph.col; ctx.fillRect(22, 82, 10, 10); ctx.fillStyle = '#fff'; ctx.fillText(ph.txt.slice(0, 22), 38, 92);
+  if(RP.random){
+    let pts = 0; done.forEach(x => { const oc = RP.outcomes[x.i]; if(!x.scored) return; pts += {A:5, C:3, D:1, M:-10, NS:-10, hit:5, miss:-10}[oc] || 0; });
+    ctx.fillText('本次得分 ' + pts + (t >= R.total ? '，HF ' + fmt(Math.max(0, pts) / R.total, 3) : ''), 22, 108);
+  }
+  if(RP.cmp){
+    const c = RP.cmp.res, dn = c.shots.filter(x => x.t <= t).length;
+    ctx.fillStyle = '#1F4E8C'; ctx.fillRect(22, 118, 10, 10); ctx.fillStyle = '#fff';
+    ctx.fillText('計畫 ' + RP.plan.name + '：' + fmt(R.total) + ' 秒', 38, 128);
+    ctx.fillStyle = '#D9822B'; ctx.fillRect(22, 136, 10, 10); ctx.fillStyle = '#fff';
+    ctx.fillText('計畫 ' + RP.cmp.plan.name + '：第 ' + dn + '／' + c.shots.length + ' 槍，' + fmt(c.total) + ' 秒', 38, 146);
+  }
+  ctx.restore();
+}
+let rpLastWall = 0;
+function replayTick(now){
+  if(!RP.on || !RP.playing){ RP.raf = 0; return; }
+  const dt = rpLastWall ? (now - rpLastWall) / 1000 : 0; rpLastWall = now;
+  if(RP.pre){   // rhythm drill countdown before the start signal
+    const pre = RP.pre; pre.left -= dt;
+    if(pre.stage === 'pause' && pre.left <= 0){
+      pre.stage = 'standby'; pre.left = Infinity;
+      sayThen('Standby', () => { if(RP.pre === pre && pre.stage === 'standby'){ pre.stage = 'wait'; pre.delay = RHYTHM_DELAY[0] + Math.random() * (RHYTHM_DELAY[1] - RHYTHM_DELAY[0]); pre.left = pre.delay; } });
+    }
+    else if(pre.stage === 'wait' && pre.left <= 0){ RP.pre = null; if(RP.sound) sndBeep(); }
+    render3d(); RP.raf = requestAnimationFrame(replayTick); return;
+  }
+  const t0 = RP.t, t1 = Math.min(RP.total, t0 + dt * RP.speed);
+  if(RP.sound) replaySounds(t0, t1);
+  RP.t = t1; syncReplayUI(true); render3d();
+  if(t1 >= RP.total){ RP.playing = false; syncReplayUI(); RP.raf = 0; return; }
+  RP.raf = requestAnimationFrame(replayTick);
+}
+function replaySounds(t0, t1){
+  if(t0 === 0 && t1 > 0 && !RP.beeped){ sndBeep(); RP.beeped = true; }
+  RP.res.shots.forEach((x, i) => {
+    if(x.t > t0 && x.t <= t1){ sndShot(); if(!x.steel && RP.outcomes[i] !== 'M') setTimeout(sndPaper, 60); }
+    const f = RP.fallT[x.target];
+    if(x.steel && f != null && f > t0 && f <= t1 && RP.res.shots.findIndex(y => y.target === x.target && RP.outcomes[y.i] === 'hit') === i) sndDing(getObj(x.target)?.type === 'stopplate');
+  });
+  (RP.rl || []).forEach(w => { if(w.a + 0.15 > t0 && w.a + 0.15 <= t1) sndClick(1); if(w.b - 0.12 > t0 && w.b - 0.12 <= t1) sndClick(2); });
+}
+// keep an open replay in step with the plan chosen or edited in the planning panel
+function replayLayoutKey(){ return JSON.stringify([stage.objects, stage.startCond, stage.safety]).length + '|' + JSON.stringify(stage.objects.map(o => [o.id, o.x, o.y, o.x1, o.y1, o.x2, o.y2])); }
+function refreshReplayForPlan(){
+  if(!RP.on) return false;
+  const plan = activePlan();
+  if(!plan){ exitReplay(); return false; }
+  const switched = RP.srcPlanId !== plan.id;
+  if(switched) replayPlanOverride = null;   // a measured-times replay stays (rebuilt on the current layout) until another plan is chosen
+  const t = RP.t;
+  startReplay({seed:RP.seed});
+  if(!RP.on) return false;
+  if(!switched){ RP.t = Math.min(t, RP.total); RP.beeped = RP.t > 0; }
+  syncReplayUI(); render3d();
+  if(switched && typeof toast === 'function') toast('3D 回放已改為計畫 ' + plan.name + '，按「播放」開始。', null, null, 3000);
+  return true;
+}
+function playReplay(){
+  if(!RP.on) return; audio();
+  const cur = activePlan();
+  if(!cur || (RP.srcPlanId !== cur.id && !replayPlanOverride) || RP.layout !== replayLayoutKey()) refreshReplayForPlan();
+  if(!RP.on) return;
+  if(RP.t >= RP.total - 1e-6){ RP.t = 0; RP.beeped = false; }
+  RP.playing = true; rpLastWall = 0; if(!RP.raf) RP.raf = requestAnimationFrame(replayTick); syncReplayUI();
+}
+function pauseReplay(){ RP.playing = false; syncReplayUI(); }
+function rhythmDrill(){
+  if(!RP.on) startReplay(); else { const cur = activePlan(); if(cur && RP.srcPlanId !== cur.id && !replayPlanOverride) refreshReplayForPlan(); }
+  if(!RP.on) return;
+  audio(); RP.t = 0; RP.beeped = true; RP.sound = true; $('rpSound').checked = true;
+  const pre = {stage:'ready', left:Infinity}; RP.pre = pre;
+  sayThen('Are you ready?', () => { if(RP.pre === pre && pre.stage === 'ready'){ pre.stage = 'pause'; pre.left = RHYTHM_READY_PAUSE; } });
+  RP.playing = true; rpLastWall = 0; if(!RP.raf) RP.raf = requestAnimationFrame(replayTick); syncReplayUI();
+}
+function exitReplay(){ replayPlanOverride = null; RP.on = false; RP.playing = false; RP.pre = null; if(v3d.mode === 'follow' || v3d.mode === 'fpv') v3d.mode = 'orbit'; refresh3dModes(); syncReplayUI(); render3d(); }
+function syncReplayUI(light){
+  const bar = $('rpBar'); if(!bar) return;
+  bar.classList.toggle('hidden', !RP.on);
+  if(!RP.on) return;
+  const sl = $('rpSlider'); sl.max = RP.total.toFixed(2); sl.value = RP.t.toFixed(2);
+  $('rpTime').textContent = fmt(Math.min(RP.t, RP.res.total)) + ' ／ ' + fmt(RP.res.total) + ' 秒';
+  if(light) return;
+  $('rpPlay').textContent = RP.playing ? '暫停' : '播放';
+  $('rpRandom').checked = RP.random; $('rpSound').checked = RP.sound;
+  const cs = $('rpCmp'); cs.innerHTML = ''; cs.appendChild(el('option', {value:'', text:'不比較其他路線'}));
+  plans().filter(p => p.id !== RP.plan.id).forEach(p => cs.appendChild(el('option', {value:p.id, text:'同時比較：計畫 ' + p.name})));
+  cs.value = RP.cmp ? RP.cmp.plan.id : '';
+}
+
+function bindReplay(){
+  $('rpPlay').addEventListener('click', () => RP.playing ? pauseReplay() : playReplay());
+  $('rpSlider').addEventListener('input', e => { RP.t = +e.target.value; RP.beeped = RP.t > 0; RP.pre = null; syncReplayUI(true); render3d(); });
+  $('rpSpeed').addEventListener('change', e => { RP.speed = +e.target.value; });
+  $('rpSound').addEventListener('change', e => { RP.sound = e.target.checked; if(RP.sound) audio(); });
+  $('rpRandom').addEventListener('change', e => { RP.random = e.target.checked; const t = RP.t; startReplay({seed:Math.floor(Math.random()*1e6)}); RP.t = t; syncReplayUI(); render3d(); });
+  $('rpRhythm').addEventListener('click', rhythmDrill);
+  $('rpExit').addEventListener('click', exitReplay);
+  $('rpCmp').addEventListener('change', e => { RP.cmpId = e.target.value || null; const t = RP.t; startReplay(); RP.t = Math.min(t, RP.total); syncReplayUI(); render3d(); });
+}

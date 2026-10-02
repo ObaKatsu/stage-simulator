@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<!-- Stage 模擬器 — Copyright (C) 2026 James — SPDX-License-Identifier: GPL-3.0-or-later — 不提供任何保證，詳見 LICENSE -->
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1E2B38">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Stage 模擬器">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>Stage 模擬器｜stage 建立</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Stage 模擬器</h1>
+  <nav class="modes" role="tablist" aria-label="工作模式"><button role="tab" data-mode="build">建場</button><button role="tab" data-mode="plan">規劃</button><button role="tab" data-mode="review">檢討</button></nav>
+  <div class="quick"><select id="qPlan" aria-label="目前路線計畫"></select><button id="qReplay" class="primary">3D 回放</button><button id="qRhythm">節奏練習</button><button id="qShooter">射手</button><button id="qInstall" class="hidden">安裝到主畫面</button></div>
+  <span class="note" id="saveNote"></span>
+</header>
+
+<div class="app">
+<aside>
+
+  <details id="secVenue" data-mode="build">
+    <summary><span class="step">1</span>設施尺寸組<span class="state" id="stVenue"></span></summary>
+    <div class="sec">
+      <p class="help">這裡只建立尺寸資料。在步驟 4 放置檔牆、油桶等物件時，會從這裡選規格並自動帶入尺寸；之後計算視線也會用到。尺寸單位為公分，檔牆沒有窗戶時窗戶欄位留空。</p>
+      <div class="rulebox">
+        <p>以下尺寸由規則書固定，已內建，不需輸入（2026 年 1 月版）：</p>
+        <ul>
+          <li>紙靶 30 × 37.5；微型紙靶 18 × 22.8（紙質 no-shoot 同所用紙靶）</li>
+          <li>靶紙依慣例以肩部與靶架最高處貼齊，工具會自動換算靶紙離地高度</li>
+          <li>鋼靶（Popper）頭部直徑 20、總高 57.5；迷你鋼靶頭部直徑 12、總高 34.5</li>
+          <li>Falling Plate直徑或邊長 10 到 20；stop plate 直徑至少 15</li>
+        </ul>
+      </div>
+      <label class="f" for="setSelect">目前使用</label>
+      <select id="setSelect"></select>
+      <div class="btns">
+        <button id="setNew">新增</button>
+        <button id="setCopy">複製</button>
+        <button id="setRename">改名</button>
+        <button id="setDelete" class="danger">刪除</button>
+      </div>
+      <div id="itemsBox" class="items"></div>
+      <div class="row" style="margin-top:8px">
+        <select id="addType"></select>
+        <button id="addItem" style="flex:none">加入物件</button>
+      </div>
+      <div class="btns">
+        <button id="setExport">匯出尺寸組</button>
+        <button id="setImport">匯入尺寸組</button>
+        <input type="file" id="setImportFile" accept=".json,application/json" class="hidden">
+      </div>
+    </div>
+  </details>
+
+  <details open id="secStage" data-mode="build">
+    <summary><span class="step">2</span>stage 來源與存檔<span class="state" id="stStage"></span></summary>
+    <div class="sec">
+      <label class="f" for="stageName">stage 名稱</label>
+      <input type="text" id="stageName" placeholder="例如 Stage 6 Cooper Tunnel">
+      <div class="row">
+        <div><label class="f" for="matchName">比賽名稱</label><input type="text" id="matchName"></div>
+        <div><label class="f" for="matchDate">比賽日期</label><input type="text" id="matchDate" placeholder="2025-05-16"></div>
+      </div>
+      <p class="help" style="margin-top:10px">來源擇一：外部比賽載入圖檔（接著做步驟 3 校正）；自辦比賽匯入 Practisim 的 STG 檔（不需校正）；也可以什麼都不載入，直接在俯視圖上手動擺放。</p>
+      <div class="btns">
+        <button id="loadImg" class="primary">載入 stage 圖檔</button>
+        <button id="loadStg" class="primary">匯入 STG 檔</button>
+        <input type="file" id="imgFile" accept="image/*" class="hidden">
+        <input type="file" id="stgFile" accept=".stg,.STG" class="hidden">
+      </div>
+      <div id="stgBox" class="hidden">
+        <div class="meta" id="stgMeta"></div>
+        <div class="btns"><button id="mirrorBtn">左右鏡像</button></div>
+        <p class="help">STG 的座標軸對應尚待驗證。如果俯視圖和 Practisim 裡看到的左右相反，按「左右鏡像」修正。檔牆與道具的尺寸 STG 沒有記錄，匯入時用估計值，請逐一確認。</p>
+      </div>
+      <div class="btns">
+        <button id="stageExport">匯出存檔</button>
+        <button id="stgExport">匯出 STG（給 Practisim）</button>
+        <button id="stageImport">開啟模擬器存檔</button>
+        <button id="stageClear" class="danger">清除重來</button>
+        <button id="fieldVer">建立現場版本</button>
+        <button id="dropDesign" class="hidden">移除設計圖對照</button>
+        <input type="file" id="stageImportFile" accept=".json,application/json" class="hidden">
+      </div>
+      <div id="stgExportBox" class="hidden"></div>
+      <div id="stgCatBox"></div>
+    </div>
+  </details>
+
+  <details id="secCal" data-mode="build">
+    <summary><span class="step">3</span>地板校正（圖檔）<span class="state" id="stCal"></span></summary>
+    <div class="sec">
+      <p class="help">在左側圖上依序點出地板上一個矩形的四個角：後左、後右、前右、前左。點錯可以直接拖曳修正。滾輪縮放，拖曳空白處平移。</p>
+      <p class="help">看不到地板前緣時：後兩點點後牆與兩側牆的交角；前兩點點左右側牆底線上、同一高度的位置。寬度填場地寬，深度先填估計值，再用滑桿微調。</p>
+      <ul class="pts" id="ptList"></ul>
+      <div class="btns">
+        <button id="calibTool">調整校正點</button>
+        <button id="ptUndo">刪除最後一點</button>
+        <button id="ptReset" class="danger">重設四點</button>
+      </div>
+      <label class="check"><input type="checkbox" id="lockRow" checked><span>前兩點鎖定同一高度（圖中後牆呈水平時使用）</span></label>
+      <div id="quadMsg"></div>
+      <div class="row">
+        <div><label class="f" for="rectW">矩形寬度（公尺）</label><input type="number" id="rectW" step="0.1" min="0.5" value="10"></div>
+        <div><label class="f" for="rectD">矩形深度（公尺）</label><input type="number" id="rectD" step="0.1" min="0.5" value="8"></div>
+      </div>
+      <label class="f" for="depthScale">深度微調：<span id="effDepth" class="readout"></span></label>
+      <input type="range" id="depthScale" min="0.5" max="1.5" step="0.005" value="1">
+      <div class="btns"><button id="applyDepth">把微調結果設為深度</button></div>
+      <p class="help">判斷標準：俯視圖中應為直角的牆、平行的邊線，看起來要是直角與平行；靶架底座應接近圓形或正方形。</p>
+      <div class="row">
+        <div><label class="f" for="x0">矩形前左角 x（公尺）</label><input type="number" id="x0" step="0.1" value="0"></div>
+        <div><label class="f" for="y0">矩形前左角 y（公尺）</label><input type="number" id="y0" step="0.1" value="0"></div>
+      </div>
+      <p class="help">座標原點是場地前方左角。若矩形前緣就是場地前緣，兩者都填 0。</p>
+      <label class="f">俯視圖額外範圍（公尺）</label>
+      <div class="row">
+        <div><label class="f" for="mSide">兩側</label><input type="number" id="mSide" step="0.5" min="0" value="0.5"></div>
+        <div><label class="f" for="mFront">前方</label><input type="number" id="mFront" step="0.5" min="0" value="4"></div>
+        <div><label class="f" for="mBack">後方</label><input type="number" id="mBack" step="0.5" min="0" value="0.5"></div>
+      </div>
+    </div>
+  </details>
+
+  <details open id="secObj" data-mode="build">
+    <summary><span class="step">4</span>放置物件<span class="state" id="stObj"></span></summary>
+    <div class="sec">
+      <p class="help">用上方工具列選擇物件，在任一側圖上點選放置。靶、鋼靶、Falling Plate、道具點一下；檔牆與邊線點起點和終點；射擊區與礦工隧道逐點點出頂點，點回第一點或按 Enter 完成。靶與牆一律點「與地面接觸的位置」。Delete 刪除選取的物件，Esc 取消。</p>
+      <label class="f" for="defTarget">新放置的紙靶尺寸</label>
+      <select id="defTarget"><option value="normal">IPSC Action Air 紙靶</option><option value="micro">微型紙靶</option></select>
+      <div class="btns"><button id="genAreas">由檔牆與邊線產生射擊區</button></div>
+      <p class="help">射擊區可以直接描，也可以由檔牆與邊線圍成：牆與牆之間用邊線補起來，只要兩端接上（誤差 25 公分內，畫的時候會自動吸附），按上面的按鈕就會自動找出所有封閉範圍。</p>
+      <div id="propsBox"></div>
+      <label class="f">物件清單</label>
+      <ul class="olist" id="objList"></ul>
+    </div>
+  </details>
+
+  <details open id="secStart" data-mode="build">
+    <summary><span class="step">5</span>起始條件<span class="state" id="stStart"></span></summary>
+    <div class="sec">
+      <p class="help">依書面賽程簡報設定。未特別規定時，規則 8.2.2 的預設是：槍已上膛放在槍套內、面向靶擋站立、雙手自然垂下。槍或彈匣放在油桶、桌子上時，請先在圖上放置該物件。</p>
+      <div id="startBox"></div>
+      <div class="kind" style="margin-top:10px">靶擋方向與安全角度</div>
+      <div class="row">
+        <div><label class="f" for="downDeg">靶擋方向（度，0 為俯視圖正上方）</label><input type="number" id="downDeg" step="1"></div>
+      </div>
+      <div class="row">
+        <div><label class="f" for="safeL">安全角度：左（度）</label><input type="number" id="safeL" step="1"></div>
+        <div><label class="f" for="safeR">安全角度：右（度）</label><input type="number" id="safeR" step="1"></div>
+      </div>
+      <p class="help">規則 2.1.2：除非另有規定，槍口角度以面向靶擋正中為準，左右各 90 度；超出者依規則 10.5.2 判 DQ。賽程簡報另有規定時，請改成該 stage 的角度。</p>
+      <div class="row">
+        <div><label class="f" for="plateCy">本 stage 的 Falling Plate／stop plate 預設中心離地（公分）</label><input type="number" id="plateCy" step="1"></div>
+      </div>
+    </div>
+  </details>
+
+  <details id="secCheck" data-mode="build">
+    <summary><span class="step">6</span>檢查與量測<span class="state" id="stCheck"></span></summary>
+    <div class="sec">
+      <label class="check"><input type="checkbox" id="showGrid" checked><span>顯示 1 公尺格線（左圖也會投影格線，可檢查是否貼合地板）</span></label>
+      <div id="scaleBox" class="hidden">
+        <div class="row">
+          <div><label class="f" for="realDist">這兩點的實際距離（公尺）</label><input type="number" id="realDist" step="0.01"></div>
+          <button id="scaleBtn" style="flex:none">依此縮放整個 stage</button>
+        </div>
+        <p class="help">用於修正比例：量一段已知長度（例如長牆 200 公分、場地寬度），輸入實際距離後，所有物件位置與校正範圍會以原點為中心等比例縮放；靶、檔牆高度等尺寸不變。</p>
+      </div>
+      <div class="readout" id="measureOut">用工具列的「測距」，在任一側圖上點兩點。</div>
+      <p class="help" style="margin-top:10px">圖檔校正時，只有貼在地板上的點是準確的。牆、靶、油桶在俯視圖的底圖上會被拉長變形，這是透視校正的正常現象。</p>
+    </div>
+  </details>
+
+  <details open id="secVis" data-mode="plan">
+    <summary><span class="step">1</span>視線分析<span class="state" id="stVis"></span></summary>
+    <div class="sec">
+      <p class="help">用工具列的「視點」在射擊區內標出可能的站位，選取視點就會算出從那裡看得到哪些靶、露出多少。檔牆一律視為擋住（除非手動標記），1.8 公尺以上的牆視為無限高。</p>
+      <label class="check"><input type="checkbox" id="flexChk"><span>考慮姿態調整：原姿勢看不清楚時，依序試算左右探身、微蹲、半蹲、跪姿、趴地，取變動最小且可全露的姿態（否則取露出最多者），並註明所需姿態與轉換時間</span></label>
+      <label class="check"><input type="checkbox" id="showHiddenChk"><span>俯視圖也畫出看不到的靶（灰色虛線）</span></label>
+      <p class="help">俯視圖線條：綠色實線為目前姿勢全露、橘色為部分；紫色點線表示要調整姿態（探身、蹲、跪、趴）才打得到。3D 射手視角只顯示目前姿勢看得到的靶。</p>
+      <div id="visBox"></div>
+      <div class="btns"><button id="visSummaryBtn">各靶可射擊視點總表</button></div>
+      <div id="visSummary"></div>
+      <div class="kind" style="margin-top:10px">停頓點建議</div>
+      <p class="help">在射擊區內自動取候選點，找出能涵蓋所有靶的最少停頓組合，並列出停頓次數不同的方案。挑選後可轉成視點，再手動微調。</p>
+      <div class="btns"><button id="suggestBtn" class="primary">自動找停頓點建議</button></div>
+      <div id="suggestBox"></div>
+    </div>
+  </details>
+
+  <details open id="secPlan" data-mode="plan">
+    <summary><span class="step">2</span>路線計畫與換匣<span class="state" id="stPlan"></span></summary>
+    <div class="sec">
+      <p class="help">把停頓點排成路線，指定每個停頓點打哪些靶、順序與發數，工具依個人參數算出逐槍時間、期望得分、hit factor 與風險。</p>
+      <label class="check"><input type="checkbox" id="planShow" checked><span>俯視圖顯示目前計畫的路線與射擊順序</span></label>
+      <div id="planBox"></div>
+    </div>
+  </details>
+
+  <details open id="secRuns" data-mode="review">
+    <summary><span class="step">1</span>實測時間與成績<span class="state" id="stRuns"></span></summary>
+    <div class="sec">
+      <div id="runBox"></div>
+    </div>
+  </details>
+
+  <details open id="secClips" data-mode="review">
+    <summary><span class="step">2</span>影片片段<span class="state" id="stClips"></span></summary>
+    <div class="sec">
+      <div id="clipBox"></div>
+    </div>
+  </details>
+
+
+  <p class="about">Stage 模擬器 © 2026 James。本程式為自由軟體，依 <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">GNU GPL 第 3 版或更新版本</a>授權，可自由使用、修改與散布；修改後再散布須以同樣授權公開原始碼。本程式依現狀提供，不提供任何保證；時間、得分、視線與安全角度的計算僅供參考，實際判定以規則與裁判為準。</p>
+</aside>
+
+<main id="main">
+    <div class="actbar hidden" id="actBar" role="toolbar" aria-label="目前操作"></div>
+  <div class="toolbar" id="toolbar"></div>
+  <section class="pane" id="imgPane">
+    <div class="pane-head">
+      <div class="tabs"><button id="tabImg" class="on">原圖</button><button id="tab3d">3D</button></div>
+      <span class="hint" id="leftHint">滾輪縮放，拖曳空白處平移</span>
+      <button id="fitImg">全圖</button>
+      <div class="v3dbar hidden" id="v3dBar">
+        <select id="v3dMode" aria-label="3D 視角"><option value="orbit">環繞視角</option></select>
+        <button id="v3dReset">重設視角</button>
+      </div>
+      <button id="wideBtn" title="隱藏俯視圖，讓左側畫面佔滿寬度">加寬畫面</button>
+    </div>
+    <div class="cwrap" id="imgWrap"><canvas id="imgCanvas"></canvas><div class="empty" id="imgEmpty">請先在步驟 2 載入 stage 圖檔，或切換到 3D</div></div>
+    <div class="rpbar hidden" id="rpBar">
+      <button id="rpPlay" class="primary">播放</button>
+      <input type="range" id="rpSlider" min="0" max="10" step="0.01" value="0" aria-label="回放時間">
+      <span class="readout" id="rpTime"></span>
+      <select id="rpSpeed" aria-label="播放速度"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+      <label class="check" style="margin:0"><input type="checkbox" id="rpSound" checked><span>音效</span></label>
+      <label class="check" style="margin:0"><input type="checkbox" id="rpRandom"><span>依命中分布隨機</span></label>
+      <select id="rpCmp" aria-label="同時比較的路線"><option value="">不比較其他路線</option></select>
+      <button id="rpRhythm">節奏練習</button>
+      <button id="rpExit">結束回放</button>
+    </div>
+    <div class="cwrap hidden" id="v3dWrap"><canvas id="v3dGL" aria-hidden="true"></canvas><canvas id="v3dCanvas"></canvas></div>
+    <div class="pane-foot readout" id="imgReadout"></div>
+  </section>
+  <section class="pane" id="topPane">
+    <div class="pane-head"><h2>俯視圖</h2><span class="hint">上方為靶擋方向</span><button id="fitTop">全圖</button></div>
+    <div class="cwrap"><canvas id="topCanvas"></canvas></div>
+    <div class="pane-foot readout" id="topReadout"></div>
+  </section>
+  <section class="respanel" id="resPanel" aria-label="結果面板">
+    <div class="res-head"><div class="rstrip" id="resStrip" aria-live="polite"></div><div class="rtabs" id="resTabs" role="tablist"></div><button id="resBig" title="放大或縮小結果面板">放大</button><button id="resToggle">收起</button></div>
+    <div class="res-body" id="resBody">
+      <div data-rt="p-sum" id="rpSummary"></div>
+      <div data-rt="p-tl" id="rpTimeline"></div>
+      <div data-rt="p-sens" id="rpSens"></div>
+      <div data-rt="p-cmp" id="rpCompare"></div>
+      <div data-rt="p-mc" id="rpMC"></div>
+      <div data-rt="r-rep" id="rvReport"></div>
+      <div data-rt="r-align" id="rvAlign"></div>
+      <div data-rt="r-vid" id="rvVideo"></div>
+      <div data-rt="r-cmp" id="rvCompare"></div>
+      <div data-rt="r-res"><div id="resultBox"></div></div>
+    </div>
+  </section>
+</main>
+
+<div id="shooterModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="smTitle">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 id="smTitle">射手</h2>
+      <div class="rtabs" id="smTabs"><button class="on" data-t="body">射手與身體</button><button data-t="param">時間、命中與換匣參數</button><button data-t="lib">匯出匯入</button></div>
+      <button id="smClose">關閉</button>
+    </div>
+    <div class="modal-body">
+      <div data-st="body">      <div id="shooterBox"></div>
+      <div class="kind" style="margin-top:6px">姿態參數</div>
+      <div id="postureBox"></div>
+      </div>
+      <div data-st="param" class="hidden"><div id="paramBox"></div></div>
+      <div data-st="lib" class="hidden">
+        <p class="help">單一射手檔用來分享或交換；全部射手檔含標竿設定，用來備份或換電腦。</p>
+      <div class="btns"><button id="profExport">匯出目前射手</button><button id="profImport">匯入單一射手</button><button id="libExport">匯出全部射手（備份）</button><button id="libImport">匯入射手資料庫</button><input type="file" id="profImportFile" accept=".json,application/json" class="hidden"><input type="file" id="libImportFile" accept=".json,application/json" class="hidden"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
+<nav class="mnav" id="mnav" aria-label="手機畫面切換">
+  <button data-p="left">3D</button><button data-p="top">俯視圖</button><button data-p="input">輸入</button><button data-p="result">結果</button>
+</nav>
+<div class="toast hidden" id="toast" role="status"></div>
+
+<script src="js/01-core.js"></script>
+<script src="js/02-visibility-3d.js"></script>
+<script src="js/02b-gl3d.js"></script>
+<script src="js/03-model-plan.js"></script>
+<script src="js/03b-montecarlo.js"></script>
+<script src="js/04-replay.js"></script>
+<script src="js/05-review.js"></script>
+<script src="js/06-video.js"></script>
+<script src="js/07-ui-init.js"></script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "0.3",
+  "type": "venueSets",
+  "exported": "2026-09-28T02:33:41.391963Z",
+  "sets": [
+    {
+      "id": "set-common-01",
+      "name": "常用尺寸",
+      "note": "",
+      "created": "2026-09-28T02:33:41.391963Z",
+      "updated": "2026-09-28T02:33:41.391963Z",
+      "items": [
+        {
+          "id": "w-short",
+          "type": "wall",
+          "name": "短牆",
+          "dims": {
+            "w": 0.9,
+            "h": 1.85,
+            "t": 0.03
+          }
+        },
+        {
+          "id": "w-long",
+          "type": "wall",
+          "name": "長牆",
+          "dims": {
+            "w": 2.0,
+            "h": 1.85,
+            "t": 0.03
+          }
+        },
+        {
+          "id": "st-high",
+          "type": "stand",
+          "name": "高靶架",
+          "dims": {
+            "top": 1.5
+          }
+        },
+        {
+          "id": "st-mid",
+          "type": "stand",
+          "name": "中靶架",
+          "dims": {
+            "top": 1.0
+          }
+        },
+        {
+          "id": "st-low",
+          "type": "stand",
+          "name": "低靶架",
+          "dims": {
+            "top": 0.5
+          }
+        }
+      ]
+    }
+  ]
+}

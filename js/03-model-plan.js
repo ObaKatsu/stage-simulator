@@ -23,7 +23,8 @@ const TP_DEFAULT = {
   trans:[0.25, 0.35, 0.50],
   nsPen:0.05,
   exitT:0.15, startCost:0.30, speed:3.0, entry:{full:0.35, rolling:0.15, move:0}, moveSplitPen:0.08,
-  reloadStatic:1.20, reloadMove:1.00, windowOpen:0.50, oneHandMult:1.30
+  reloadStatic:1.20, reloadMove:1.00, windowOpen:0.50, oneHandMult:1.30, tunnelSpeed:0.45,
+  climbUp:0.50, climbDown:0.40, sitDown:0.60, standUp:0.60, dismount:1.00, sitEye:0.78
 };
 const HP_DEFAULT = {
   paper:[{A:90,C:9,D:1,M:0},{A:80,C:15,D:3,M:2},{A:70,C:20,D:5,M:5},{A:60,C:25,D:7,M:8}],
@@ -37,7 +38,7 @@ const TP_LABELS = [
   ['split.0','同靶 split：5 公尺內','s'],['split.1','同靶 split：5 到 8 公尺','s'],['split.2','同靶 split：8 到 10 公尺','s'],['split.3','同靶 split：10 公尺以上','s'],
   ['expPen.partial','部分遮蔽另加','s'],['expPen.heavy','嚴重遮蔽另加','s'],['steelPen','鋼靶、Falling Plate 另加','s'],['nsPen','有 no-shoot 的靶另加（精確瞄準）','s'],
   
-  ['exitT','出位時間','s'],['startCost','起步成本','s'],['speed','行進速度','m/s'],
+  ['exitT','出位時間','s'],['startCost','起步成本','s'],['speed','行進速度','m/s'],['tunnelSpeed','礦工隧道內移動速度（一般速度的倍數）','×'],['climbUp','站上講台、橋、船（估計）','s'],['climbDown','走下講台、橋、船（估計）','s'],['sitDown','坐下或跨坐上去（估計）','s'],['standUp','從座位起身（估計）','s'],['dismount','下馬（估計）','s'],['sitEye','坐姿眼睛高於座面（估計）','m'],
   ['entry.full','進位：完全停頓','s'],['entry.rolling','進位：減速通過','s'],['entry.move','進位：移動中射擊','s'],['moveSplitPen','移動中射擊 split 另加','s'],
   ['reloadStatic','定點換匣','s'],['reloadMove','移動中換匣','s'],['windowOpen','開窗','s'],['oneHandMult','單手射擊 split 倍數','×']
 ];
@@ -295,14 +296,28 @@ function planChanged(persist){ planCache = null; if(typeof refreshReplayForPlan 
 /* ---------- phase 3a: time model ---------- */
 let planCache = null;
 function distBand(d){ return d <= 5 ? 0 : d <= 8 ? 1 : d <= 10 ? 2 : 3; }
+// beep to first shot: a value set for this stage, or the shooter's draw / pick-up time plus the extras
+function startParts(){
+  const T = PROFILE.time, c = stage.startCond, out = [];
+  out.push(c.gunLoc === 'holster' ? ['出槍（槍在身上）', T.startHolster] : ['取槍（槍在物件上）', T.startPickup]);
+  if(c.ready === 'unloaded') out.push(['CON3 入匣', T.loadExtra], ['上膛', T.emptyChamber]);
+  if(c.ready === 'emptyChamber') out.push(['CON2 上膛', T.emptyChamber]);
+  if(c.facing === 'uprange') out.push(['背向靶擋轉身', T.uprange]);
+  const rise = startRise(); if(rise) out.unshift([c.pose === 'straddle' ? '下馬' : '起身', rise]);
+  if(divInfo(PROFILE.division).da && c.ready === 'loaded' && T.daFirst) out.push(['第一槍雙動作', T.daFirst]);
+  return out;
+}
+// seated or straddling start that must get up before drawing (time in seconds, 0 when standing or shooting seated)
+function startRise(){
+  const c = stage.startCond, T = PROFILE.time;
+  if(!c.pose || c.pose === 'stand' || c.after === 'stay') return 0;
+  return c.pose === 'straddle' ? (T.dismount || 1.0) : (T.standUp || 0.6);
+}
+function startTimeAuto(){ return startParts().reduce((a, x) => a + (x[1] || 0), 0); }
 function startTime(){
-  const T = PROFILE.time, c = stage.startCond;
-  let t = c.gunLoc === 'holster' ? T.startHolster : T.startPickup;
-  if(c.ready === 'unloaded') t += T.loadExtra + T.emptyChamber;   // CON3: insert magazine and rack
-  if(c.ready === 'emptyChamber') t += T.emptyChamber;
-  if(c.facing === 'uprange') t += T.uprange;
-  if(divInfo(PROFILE.division).da && c.ready === 'loaded') t += T.daFirst || 0;
-  return t;
+  const c = stage.startCond;
+  if(c.firstShot != null && c.firstShot > 0) return c.firstShot;
+  return startTimeAuto();
 }
 function hitDist(band, expo, stopType, oneHand, hasNS){
   const H = PROFILE.hit, b = Object.assign({NS:0}, H.paper[band]);
@@ -336,6 +351,7 @@ function computePlan(plan, opts){
   const shots = [], warnings = [];
   let t = 0, prev = start ? [start.x, start.y] : (plan.stops[0] ? [plan.stops[0].x, plan.stops[0].y] : [0, 0]);
   let prevStance = 'stand', idx = 0, sumShoot = 0, sumMove = 0, sumWait = 0;
+  const tunnelRisk = [];  // tunnel crossings: slats passed and the chance to knock each one
   const shotTime = {};   // target id -> time of its last shot
   const hitTime = {};    // target id -> when the BB of its last shot arrives (activations start from the hit)
   plan.stops.forEach((st, k) => {
@@ -348,7 +364,25 @@ function computePlan(plan, opts){
       const vl = 3 / Math.max(0.3, PROFILE.body.lateral3m - T.startCost);
       vEff = 1 / ((1 - sAng) / T.speed + sAng / vl);
     }
-    const travel = moving ? d / vEff : 0;
+    // crossing a Cooper tunnel: slower (bent low) and every slat passed may be knocked down (1 PE each)
+    let tunExtra = 0;
+    if(moving) stage.objects.forEach(o => {
+      if(o.type !== 'tunnel' || o.x1 == null) return;
+      const ins = tunnelInside(o, prev, [st.x, st.y]); if(ins.len < 0.05) return;
+      const f = Math.min(1, Math.max(0.1, T.tunnelSpeed || 0.45));
+      tunExtra += ins.len / vEff * (1 / f - 1);
+      tunnelRisk.push({tunnel:o.id, label:o.label, stop:k, n:ins.slats, p:o.knockP != null ? o.knockP : TUNNEL_DEF.knockP, idx:ins.idx, len:ins.len});
+    });
+    // stepping up onto / down from a podium, bridge or boat; getting up from a seat before leaving it
+    let climb = 0;
+    if(moving){
+      const h0 = surfaceAt(prev[0], prev[1]), h1 = surfaceAt(st.x, st.y);
+      if(h1 - h0 > 0.12){ climb += T.climbUp || 0.5; } else if(h0 - h1 > 0.12){ climb += T.climbDown || 0.4; }
+      const pst = k > 0 ? plan.stops[k-1] : null;
+      if(pst && pst.stance === 'sit'){ const s0 = seatAt(pst.x, pst.y); climb += s0 && s0.straddle ? (T.dismount || 1.0) : (T.standUp || 0.6); }
+      if(k === 0) climb += startRise();
+    }
+    const travel = moving ? d / vEff + tunExtra + climb : 0;
     const moveT = moving ? (k > 0 ? T.exitT : 0) + T.startCost + travel : 0;
     let wait = 0; const waitWhy = [];
     let stopRl = null;
@@ -359,6 +393,15 @@ function computePlan(plan, opts){
       stopRl = {used:false, extra}; reloadLog.push({stop:k, extra, moving, forced:false});
     }
     const stance = st.stance || 'stand';
+    if(stance === 'sit'){
+      const se = seatAt(st.x, st.y), startSeated = k === 0 && !moving && stage.startCond.pose && stage.startCond.pose !== 'stand';
+      if(!se) warnings.push('S' + (k+1) + ' 設為坐姿，但附近沒有椅子、船或馬');
+      else if(!startSeated && !(k > 0 && !moving && plan.stops[k-1].stance === 'sit')){ wait += T.sitDown || 0.6; waitWhy.push((se.straddle ? '跨坐上去 ' : '坐下 ') + fmt(T.sitDown || 0.6) + ' 秒'); }
+    }
+    if(k === 0 && stage.startCond.after === 'stay' && stage.startCond.pose && stage.startCond.pose !== 'stand' && (stance !== 'sit' || moving)) warnings.push('起始條件為坐著射擊，但第一個停頓點不在座位上或姿勢不是坐姿');
+    { const tn = inTunnel(st.x, st.y);
+      if(tn){ const head = (PROFILE.postures[stance]?.eye || 1.6) + 0.12, hh = tn.h || TUNNEL_DEF.h;
+        if(head > hh - 0.02) warnings.push('S' + (k+1) + ' 在 ' + tn.label + ' 礦工隧道內：' + POSTURE_NAME[stance] + '頭頂約 ' + Math.round(head*100) + ' 公分，高於隧道的 ' + Math.round(hh*100) + ' 公分，會撞落橫條；請改用較低的姿勢'); } }
     const postT = Math.max(0, (PROFILE.postures[stance]?.t || 0) - (!moving && prevStance === stance ? PROFILE.postures[stance]?.t || 0 : 0));
     if(postT > 0){ wait += postT; waitWhy.push(POSTURE_NAME[stance] + ' ' + fmt(postT) + ' 秒'); }
     if(st.targets.some(x => vis[x.id]?.needOpen)){ wait += T.windowOpen; waitWhy.push('開窗 ' + fmt(T.windowOpen) + ' 秒'); }
@@ -445,7 +488,9 @@ function computePlan(plan, opts){
     const f = lastShot.flight; lastShot.t += f; lastShot.dt += f; lastShot.parts.wait += f; sumWait += f; t += f;
     lastShot.why = (lastShot.why ? lastShot.why + '；' : '') + '含 BB 飛行 ' + fmt(f, 3) + ' 秒（stop plate 命中才停錶）';
   }
-  const total = t, ePts = shots.reduce((a, x) => a + x.ep, 0);
+  const ePE = tunnelRisk.reduce((a, r) => a + r.n * r.p, 0);
+  tunnelRisk.forEach(r => { if(r.n) warnings.push('S' + (r.stop + 1) + ' 前穿越 ' + r.label + ' 礦工隧道：通過 ' + r.n + ' 根橫條，預估碰落 ' + fmt(r.n * r.p, 2) + ' 根（每根一個 PE）'); });
+  const total = t, ePts = shots.reduce((a, x) => a + x.ep, 0) - 10 * ePE;
   const maxPts = shots.reduce((a, x) => a + (x.scored ? 5 : 0), 0);
   // Monte Carlo risk
   const N = opts.noMC ? 0 : 4000, hfs = new Float64Array(Math.max(1, N));
@@ -457,6 +502,7 @@ function computePlan(plan, opts){
       if(x.steel) pts += u < x.pS ? 5 : -10;
       else { const h = x.hd; pts += u < h.A ? 5 : u < h.A + h.C ? 3 : u < h.A + h.C + h.D ? 1 : u < h.A + h.C + h.D + h.M ? -10 : -10; }
     }
+    tunnelRisk.forEach(r => { for(let i = 0; i < r.n; i++) if(Math.random() < r.p) pts -= 10; });
     hfs[n] = total > 0 ? Math.max(0, pts) / total : 0;
   }
   hfs.sort();
@@ -466,7 +512,7 @@ function computePlan(plan, opts){
   if(minR && shots.length < minR) warnings.push('計畫共 ' + shots.length + ' 發，少於 STG 記錄的 ' + minR + ' 發');
   const covered = new Set(plan.stops.flatMap(s => s.targets.map(x => x.id)));
   engageable().forEach(o => { if(!covered.has(o.id)) warnings.push(o.label + ' 沒有排入計畫'); });
-  return {shots, total, ePts, maxPts, eHF:total > 0 ? ePts / total : 0, p10:N ? hfs[Math.floor(N*0.1)] : 0, p50:N ? hfs[Math.floor(N*0.5)] : 0,
+  return {shots, total, ePts, maxPts, tunnelRisk, ePE, eHF:total > 0 ? ePts / total : 0, p10:N ? hfs[Math.floor(N*0.1)] : 0, p50:N ? hfs[Math.floor(N*0.5)] : 0,
           sumShoot, sumMove, sumWait, stops:plan.stops.length, reloads, load, division:PROFILE.division, full:plan.stops.filter(s => s.stopType === 'full').length,
           rolling:plan.stops.filter(s => s.stopType === 'rolling').length, warnings, reloadLog, reloadMode:rmode};
 }
@@ -657,7 +703,7 @@ function renderPlanPanel(){
     d.appendChild(el('div', {class:'kind', text:'停頓點 S' + (k+1) + '（' + fmt(st.x, 1) + ', ' + fmt(st.y, 1) + '）'}));
     d.appendChild(row(
       selField('停頓類型', [['full','完全停頓'],['rolling','減速通過'],['move','移動中射擊']], st.stopType, v => { st.stopType = v; planChanged(); }),
-      selField('姿勢', POSTURE_ORDER.map(x => [x, POSTURE_NAME[x]]), st.stance || 'stand', v => { st.stance = v; planChanged(); })));
+      selField('姿勢', STANCE_OPTS(), st.stance || 'stand', v => { st.stance = v; planChanged(); })));
     if(rm === 'manual') d.appendChild(chk('到這個停頓點前換匣', st.reload, v => { st.reload = v; planChanged(); }));
     R.reloadLog.filter(r => r.stop === k).forEach(r => { const w = el('div', {class:'readout', text:'換匣：' + (r.forced ? '' : '到這個停頓點前，') + reloadText(r)}); w.style.color = 'var(--warn)'; d.appendChild(w); });
     const picking = pendingOrder && pendingOrder.stopId === st.id;

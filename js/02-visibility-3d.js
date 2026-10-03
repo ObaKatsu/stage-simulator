@@ -12,7 +12,8 @@ const AZONE = [[13,1.5],[17,1.5],[18.5,6],[18.5,18],[17,22],[13,22],[11.5,18],[1
 let visVersion = 0;
 const LS_PROFILE = 'stageSim.profile';
 const POSTURE_ORDER = ['stand','crouch','half','kneel','prone'];
-const POSTURE_NAME = {stand:'站姿', crouch:'微蹲', half:'半蹲', kneel:'跪姿', prone:'趴地', custom:'自訂'};
+const POSTURE_NAME = {stand:'站姿', crouch:'微蹲', half:'半蹲', kneel:'跪姿', prone:'趴地', sit:'坐姿', custom:'自訂'};
+const STANCE_OPTS = () => POSTURE_ORDER.map(k => [k, POSTURE_NAME[k]]).concat([['sit','坐姿（坐在椅子、船上或跨坐）']]);
 function defaultProfile(){
   return {schemaVersion:SCHEMA, type:'profile', name:'', lean:0.25, postures:{
     stand:{eye:1.68, t:0, est:false}, crouch:{eye:1.55, t:0.2, est:true}, half:{eye:1.30, t:0.5, est:true},
@@ -146,7 +147,13 @@ function renderShooterBox(){
   box.appendChild(el('div', {class:'btns'}, el('button', {class:'primary', text:'依實測擬合轉動參數', onclick:fitTransitions})));
 }
 function postureEye(k){ const p = PROFILE.postures[k]; return p ? p.eye : PROFILE.postures.stand.eye; }
-function eyeOf(v){ return v.stance === 'custom' && v.eyeH ? v.eyeH : postureEye(v.stance || 'stand'); }
+// eye height above the ground: the posture's eye height plus what the shooter stands on, or the seat plus the seated eye height
+function sitEye(){ return (PROFILE.time && PROFILE.time.sitEye) || 0.78; }
+function eyeOf(v){
+  if(v.stance === 'custom' && v.eyeH) return v.eyeH;
+  if(v.stance === 'sit'){ const s = typeof seatAt === 'function' ? seatAt(v.x, v.y) : null; return (s ? s.h : 0.45) + sitEye(); }
+  return postureEye(v.stance || 'stand') + (typeof surfaceAt === 'function' ? surfaceAt(v.x, v.y) : 0);
+}
 function renderPostureBox(){
   const box = $('postureBox'); if(!box) return; box.innerHTML = '';
   POSTURE_ORDER.forEach(k => {
@@ -207,6 +214,14 @@ function occluders(){
         cur = Math.max(cur, s1);
       });
       if(cur < L) addRect(P(cur), P(L), 0, zTop, o, !!o.seeThrough, !!o.soft);
+    }else if(o.type === 'platform' || (o.type === 'bridge' && o.x1 != null)){
+      const c = perchFootprint(o), h = o.h || 0.4; for(let i = 0; i < 4; i++) addRect(c[i], c[(i+1)%4], 0, h, o, false, false);
+    }else if(o.type === 'boat'){
+      const c = boatHull(o), h = (o.h || 0.2) + (o.rim || 0.6); for(let i = 0; i < c.length; i++) addRect(c[i], c[(i+1)%c.length], 0, h, o, false, false);
+    }else if(o.type === 'tunnel' && o.x1 != null && o.sides && o.sides !== 'open'){
+      const g = tunnelGeom(o);
+      addRect(g.P(0, -g.w/2), g.P(g.L, -g.w/2), 0, g.h, o, o.sides === 'mesh', false);
+      addRect(g.P(0, g.w/2), g.P(g.L, g.w/2), 0, g.h, o, o.sides === 'mesh', false);
     }else if(o.type === 'barrel' || o.type === 'table' || o.type === 'prop'){
       const w = o.type === 'barrel' ? (o.d || 0.6) : (o.w || 0.5), dp = o.type === 'barrel' ? (o.d || 0.6) : (o.dp || 0.5);
       const c = rectPts(o.x, o.y, w, dp, o.rot || 0), h = o.h || 0.9;
@@ -263,14 +278,16 @@ function evalSamples(E, samples, occ){
 function postures(vp){
   const d = downDir(), right = [d[1], -d[0]], L = PROFILE.lean;
   const base = vp.stance === 'custom' ? null : vp.stance || 'stand';
-  const t0 = base ? PROFILE.postures[base].t : 0;
+  const t0 = base && PROFILE.postures[base] ? PROFILE.postures[base].t : 0;
+  const lift = typeof surfaceAt === 'function' ? surfaceAt(vp.x, vp.y) : 0;
   const mk = (k, eye, lat, tag) => ({E:[vp.x + right[0]*lat, vp.y + right[1]*lat, eye], key:k, lat, dt:k && PROFILE.postures[k] ? Math.max(0, PROFILE.postures[k].t - t0) : 0, tag});
   const list = [mk(base, eyeOf(vp), 0, '')];
   if(!stage.flex) return list;
   list.push(mk(base, eyeOf(vp), -L, '向左探身'), mk(base, eyeOf(vp), L, '向右探身'));
+  if(base === 'sit') return list;   // seated: lean only
   const from = base ? POSTURE_ORDER.indexOf(base) + 1 : 0;
   POSTURE_ORDER.slice(from).forEach(k => {
-    const eye = postureEye(k);
+    const eye = postureEye(k) + (vp.stance === 'custom' ? 0 : lift);
     if(vp.stance === 'custom' && eye >= eyeOf(vp)) return;
     list.push(mk(k, eye, 0, ''));
     if(k !== 'prone') list.push(mk(k, eye, -L, '向左探身'), mk(k, eye, L, '向右探身'));
@@ -611,6 +628,70 @@ function swingFrame3d(faces, o, g, solid){
     faces.push({pts:gl.oct.map(([u2, v2]) => gl.toW(u2, v2)), fill:null, stroke:'rgba(107,63,160,.75)', lw:1.5});
   }
 }
+/* podium, bridge, boat, chair, horse */
+function cylAxisFaces(faces, a, b, r, fill, edge, seg){
+  seg = seg || 16; const d = [b[0]-a[0], b[1]-a[1], b[2]-a[2]], L = Math.hypot(d[0], d[1], d[2]) || 1, k = [d[0]/L, d[1]/L, d[2]/L];
+  let u = Math.abs(k[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]; u = cross3(k, u); const ul = Math.hypot(u[0], u[1], u[2]); u = [u[0]/ul, u[1]/ul, u[2]/ul]; const v = cross3(k, u);
+  const ring = c => { const out = []; for(let i = 0; i < seg; i++){ const t = i/seg*Math.PI*2; out.push([c[0] + (u[0]*Math.cos(t) + v[0]*Math.sin(t))*r, c[1] + (u[1]*Math.cos(t) + v[1]*Math.sin(t))*r, c[2] + (u[2]*Math.cos(t) + v[2]*Math.sin(t))*r]); } return out; };
+  const A = ring(a), B = ring(b);
+  for(let i = 0; i < seg; i++){ const j = (i+1) % seg; faces.push({pts:[A[i], A[j], B[j], B[i]], fill, stroke:null}); }
+  faces.push({pts:A, fill, stroke:edge, lw:1}); faces.push({pts:B, fill, stroke:edge, lw:1});
+}
+function perch3d(faces, floor, labels, o, solid){
+  const wood = '#B88A55', woodE = '#6E5230', f = facing(o.rot || 0), p = [-f[1], f[0]];
+  const L = (a, b) => [o.x + f[0]*a + p[0]*b, o.y + f[1]*a + p[1]*b];
+  let top = 0.5;
+  if(o.type === 'platform'){ const h = o.h || 0.4; top = h; boxFaces(faces, perchFootprint(o), 0, h, '#A98458', woodE, 1.2); }
+  else if(o.type === 'bridge'){
+    if(o.x1 == null) return; const h = o.h || 0.4, a = [o.x1, o.y1], b = [o.x2, o.y2], Ln = Math.hypot(b[0]-a[0], b[1]-a[1]) || 1, u = [(b[0]-a[0])/Ln, (b[1]-a[1])/Ln]; top = h;
+    boxFaces(faces, perchFootprint(o), h - 0.05, h, '#A98458', woodE, 1.2);
+    const n = Math.max(2, Math.ceil(Ln / 1.0) + 1), w = (o.w || 0.6)/2, nn = [-u[1], u[0]];
+    for(let i = 0; i < n; i++){ const s = Ln*i/(n-1); [-1, 1].forEach(sd => { const q = [a[0] + u[0]*s + nn[0]*sd*(w - 0.04), a[1] + u[1]*s + nn[1]*sd*(w - 0.04)]; postFaces(faces, q[0], q[1], 0.03, 0, h - 0.05, wood, woodE); }); }
+    [[a, -1], [b, 1]].forEach(([e, sg]) => { const c0 = [e[0] + u[0]*sg*0.15, e[1] + u[1]*sg*0.15]; boxFaces(faces, segCorners([c0[0] - u[0]*0.15, c0[1] - u[1]*0.15], [c0[0] + u[0]*0.15, c0[1] + u[1]*0.15], o.w || 0.6), 0, h/2, '#9C7A50', woodE, 1); });
+  }else if(o.type === 'boat'){
+    const hull = boatHull(o), h0 = o.h || 0.2, rim = h0 + (o.rim || 0.6); top = rim;
+    for(let i = 0; i < hull.length; i++){ const c = segCorners(hull[i], hull[(i+1) % hull.length], 0.04); if(solid) boxFaces(faces, c, 0, rim, '#3F6E96', '#1F3A52', 1); else faces.push({pts:[[hull[i][0],hull[i][1],0],[hull[(i+1)%hull.length][0],hull[(i+1)%hull.length][1],0],[hull[(i+1)%hull.length][0],hull[(i+1)%hull.length][1],rim],[hull[i][0],hull[i][1],rim]], fill:'#3F6E96'}); }
+    faces.push({pts:hull.map(q => [q[0], q[1], h0]), fill:'#8F6E4A', stroke:'#5E4628', lw:1});
+    const Lb = o.dp || 2.2, W = o.w || 1.0, sb = o.seat || 0.45;
+    boxFaces(faces, segCorners(L(-Lb/4, -W/2 + 0.04), L(-Lb/4, W/2 - 0.04), 0.25), sb - 0.04, sb, wood, woodE, 1);
+  }else if(o.type === 'chair'){
+    const sh = o.seat || 0.45, w = (o.w || 0.45)/2, d = (o.dp || 0.45)/2; top = sh + 0.45;
+    boxFaces(faces, perchFootprint(o), sh - 0.04, sh, '#8C6A44', woodE, 1);
+    [[-d + 0.03, -w + 0.03], [-d + 0.03, w - 0.03], [d - 0.03, -w + 0.03], [d - 0.03, w - 0.03]].forEach(([a, b]) => { const q = L(a, b); postFaces(faces, q[0], q[1], 0.018, 0, sh - 0.04, '#5E4628', '#3A2A18'); });
+    boxFaces(faces, segCorners(L(-d + 0.02, -w), L(-d + 0.02, w), 0.03), sh, sh + 0.45, '#8C6A44', woodE, 1);
+  }else if(o.type === 'horse'){
+    const sh = o.seat || 0.8, Lh = o.dp || 1.0, r = 0.28; top = sh;
+    [-Lh/2 + 0.12, Lh/2 - 0.12].forEach(a => { const l1 = L(a, -0.25), l2 = L(a, 0.25), mid = L(a, 0); faces.push({line:[[l1[0], l1[1], 0], [mid[0], mid[1], sh - 2*r]], stroke:'#5E4628', wlw:0.04}); faces.push({line:[[l2[0], l2[1], 0], [mid[0], mid[1], sh - 2*r]], stroke:'#5E4628', wlw:0.04}); });
+    const a3 = L(-Lh/2, 0), b3 = L(Lh/2, 0);
+    cylAxisFaces(faces, [a3[0], a3[1], sh - r], [b3[0], b3[1], sh - r], r, '#B8433A', '#6E211B', 18);
+    boxFaces(faces, segCorners(L(-0.18, 0), L(0.18, 0), 0.34), sh - 0.02, sh + 0.04, '#5A3A22', '#2E1D10', 1);
+  }
+  const c = o.type === 'bridge' ? [(o.x1 + o.x2)/2, (o.y1 + o.y2)/2] : [o.x, o.y];
+  labels.push({p:[c[0], c[1], top + 0.15], t:o.label + ' ' + OBJ[o.type].label.replace(/（.*）/, ''), c:'#6E5230', pri:3});
+}
+/* Cooper tunnel: posts and side rails (inverted U), optional mesh or panels, loose slats across the top */
+function tunnel3d(faces, floor, labels, o, solid){
+  const g = tunnelGeom(o), H = g.h, post = 0.025, wood = '#B88A55', woodE = '#6E5230';
+  floor.push({pts:g.corners.map(q => [q[0], q[1], 0.006]), fill:'rgba(185,139,78,.16)', stroke:null});
+  const nPost = Math.max(2, Math.ceil(g.L / 1.2) + 1);
+  [-1, 1].forEach(sd => {
+    const q = sd * g.w / 2;
+    for(let i = 0; i < nPost; i++){ const s = g.L * i / (nPost - 1), c = g.P(s, q); if(solid) postFaces(faces, c[0], c[1], post, 0, H, wood, woodE); else faces.push({line:[[c[0], c[1], 0], [c[0], c[1], H]], stroke:wood, lw:2}); }
+    const a = g.P(0, q), b = g.P(g.L, q);
+    if(solid) boxFaces(faces, segCorners(a, b, 0.05), H - 0.05, H, wood, woodE, 0.8); else faces.push({line:[[a[0], a[1], H], [b[0], b[1], H]], stroke:wood, lw:2});
+    if(o.sides === 'panel'){ if(solid) boxFaces(faces, segCorners(a, b, 0.02), 0, H - 0.05, '#A9927A', woodE, 0.8); else faces.push({pts:[[a[0],a[1],0],[b[0],b[1],0],[b[0],b[1],H],[a[0],a[1],H]], fill:'#A9927A', stroke:woodE}); }
+    else if(o.sides === 'mesh') faces.push({pts:[[a[0],a[1],0.02],[b[0],b[1],0.02],[b[0],b[1],H - 0.05],[a[0],a[1],H - 0.05]], fill:'rgba(110,120,130,.22)', stroke:'rgba(70,80,90,.6)', lw:0.8});
+  });
+  // loose slats resting on the rails (not fixed); knocked ones lie on the ground during replay
+  const fallen = typeof tunnelFallen === 'function' ? tunnelFallen(o) : null;
+  g.slats.forEach((s, i) => {
+    const a = g.P(s, -g.w/2 - 0.06), b = g.P(s, g.w/2 + 0.06);
+    if(fallen && fallen.has(i)){ const a2 = g.P(s + 0.05, -g.w/2 + 0.1), b2 = g.P(s + 0.25, g.w/2 - 0.05); if(solid) boxFaces(faces, segCorners(a2, b2, 0.035), 0, 0.02, '#D9B98A', woodE, 0.8); return; }
+    if(solid) boxFaces(faces, segCorners(a, b, 0.035), H, H + 0.02, '#D9B98A', woodE, 0.8);
+    else faces.push({line:[[a[0], a[1], H + 0.01], [b[0], b[1], H + 0.01]], stroke:'#D9B98A', lw:2});
+  });
+  const m = g.P(g.L/2, 0); labels.push({p:[m[0], m[1], H + 0.2], t:o.label + ' 礦工隧道', c:'#6E5230', pri:3});
+}
 /* solid shapes for the 3D view (planar polygons, usable by both renderers) */
 function boxFaces(faces, c4, z0, z1, fill, edge, lw, extra){
   const q = (a, b) => [[a[0],a[1],z0],[b[0],b[1],z0],[b[0],b[1],z1],[a[0],a[1],z1]];
@@ -644,7 +725,15 @@ function build3d(statusMap, cam){
     if(o.type === 'area') floor.push({pts:o.pts.map(p => [p[0], p[1], 0.004]), fill:'rgba(234,196,80,.45)'});
     if(o.type === 'faultline') floor.push(solid ? {line:[[o.x1,o.y1,0.02],[o.x2,o.y2,0.02]], stroke:'#C8372D', wlw:0.05} : {line:[[o.x1,o.y1,0.02],[o.x2,o.y2,0.02]], stroke:'#C8372D', lw:4});
     if(o.type === 'start'){ const f = facing(o.rot), p = [-f[1], f[0]]; floor.push({pts:[[o.x+f[0]*0.35,o.y+f[1]*0.35,0.01],[o.x-f[0]*0.2+p[0]*0.22,o.y-f[1]*0.2+p[1]*0.22,0.01],[o.x-f[0]*0.2-p[0]*0.22,o.y-f[1]*0.2-p[1]*0.22,0.01]], fill:'#2F6FA8'}); }
-    if(o.type === 'trigger' && o.trig === 'laser'){ const f = facing(o.rot), p = [-f[1], f[0]], L = o.len || 1; floor.push({line:[[o.x-p[0]*L/2,o.y-p[1]*L/2,0.3],[o.x+p[0]*L/2,o.y+p[1]*L/2,0.3]], stroke:'#6B3FA0', lw:2}); }
+    if(o.type === 'trigger' && o.trig === 'laser'){ const f = facing(o.rot), p = [-f[1], f[0]], L = o.len || 1;
+      const a1 = [o.x-p[0]*L/2, o.y-p[1]*L/2], b1 = [o.x+p[0]*L/2, o.y+p[1]*L/2];
+      if(solid){ postFaces(faces, a1[0], a1[1], 0.03, 0, 0.4, '#3A3F44', '#111'); postFaces(faces, b1[0], b1[1], 0.03, 0, 0.4, '#3A3F44', '#111'); }
+      faces.push({line:[[a1[0], a1[1], 0.3], [b1[0], b1[1], 0.3]], stroke:'rgba(220,40,40,.85)', lw:1.5}); }
+    else if(o.type === 'trigger' && o.trig === 'pedal'){ const c = rectPts(o.x, o.y, 0.4, 0.3, o.rot || 0); if(solid) boxFaces(faces, c, 0, 0.04, '#6B3FA0', '#3B2160', 1); else floor.push({pts:c.map(q => [q[0], q[1], 0.01]), fill:'#6B3FA0'}); }
+    else if(o.type === 'trigger' && (o.trig === 'rope' || o.trig === 'other')){
+      if(solid) postFaces(faces, o.x, o.y, 0.03, 0, 1.4, '#6E7F90', '#34404C'); else faces.push({line:[[o.x, o.y, 0], [o.x, o.y, 1.4]], stroke:'#6E7F90', lw:3});
+      if(o.trig === 'rope'){ faces.push({line:[[o.x, o.y, 1.4], [o.x + 0.05, o.y, 0.9]], stroke:'#C9A56E', lw:2}); faces.push({dot:[o.x + 0.05, o.y, 0.88], fill:'#C8372D', wr:0.03}); }
+      else faces.push({dot:[o.x, o.y, 1.42], fill:'#6B3FA0', wr:0.05}); }
   });
   if(typeof planPath3d === 'function') planPath3d(floor, labels);
   stage.objects.forEach(o0 => {
@@ -748,8 +837,10 @@ function build3d(statusMap, cam){
       const c = rectPts(o.x, o.y, w, dp, o.rot || 0);
       for(let i = 0; i < 4; i++) faces.push({pts:quad(c[i], c[(i+1)%4], 0, h), fill, stroke:'rgba(40,40,40,.5)', lw:0.8});
       faces.push({pts:c.map(q => [q[0], q[1], h]), fill, stroke:'rgba(40,40,40,.5)', lw:0.8});
-    }else if(o.type === 'tunnel' && o.pts.length >= 3){
-      faces.push({pts:o.pts.map(p => [p[0], p[1], 1.2]), fill:'rgba(185,139,78,.25)', stroke:'#B98B4E', lw:1.2});
+    }else if(o.type === 'tunnel' && o.x1 != null){
+      tunnel3d(faces, floor, labels, o, solid);
+    }else if(['platform','bridge','boat','chair','horse'].includes(o.type)){
+      perch3d(faces, floor, labels, o, solid);
     }else if(o.type === 'viewpoint'){
       const eh = eyeOf(o);
       if(solid){ floor.push({pts:circlePts(o.x, o.y, 0.2, 20).map(q => [q[0], q[1], 0.008]), fill:'rgba(47,111,168,.18)', stroke:'#2F6FA8', lw:1.5});

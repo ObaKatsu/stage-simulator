@@ -28,7 +28,7 @@ function runMonteCarlo(plan, o){
   const ln = s => Math.exp(s * g() - s * s / 2);           // lognormal factor with mean 1
   const load = PROFILE.byDiv[R.division] ? PROFILE.byDiv[R.division].load : 15, T = PROFILE.time;
   const times = new Float64Array(N), pts = new Float64Array(N), hfs = new Float64Array(N);
-  let anyMiss = 0, anyNS = 0, steelDown = 0, makeups = 0, extraRl = 0, spMiss = 0;
+  let anyMiss = 0, anyNS = 0, steelDown = 0, makeups = 0, extraRl = 0, spMiss = 0, tunPE = 0, anyPE = 0;
   const steelTargets = new Set(shots.filter(x => x.steel).map(x => x.target));
   for(let n = 0; n < N; n++){
     const day = ln(sRun);
@@ -61,6 +61,8 @@ function runMonteCarlo(plan, o){
         else if(u < h.A + h.C + h.D + h.M){ p -= 10; miss = true; } else { p -= 10; ns = true; }
       }
     }
+    let pe = 0; (R.tunnelRisk || []).forEach(r => { for(let i = 0; i < r.n; i++) if(rand() < r.p) pe++; });
+    p -= 10 * pe; tunPE += pe; if(pe) anyPE++;
     times[n] = t; pts[n] = Math.max(0, p); hfs[n] = t > 0 ? Math.max(0, p) / t : 0;
     if(miss) anyMiss++; if(ns) anyNS++; if(down) steelDown++; makeups += mk; if(rl) extraRl++;
   }
@@ -74,7 +76,7 @@ function runMonteCarlo(plan, o){
     pts:{mean:mP, p10:pct(sP, 0.1), p50:pct(sP, 0.5), p90:pct(sP, 0.9), max:R.maxPts},
     hf:{mean:mHF, sd:sHF, se:sHF / Math.sqrt(N), p5:pct(sH, 0.05), p10:pct(sH, 0.1), p50:pct(sH, 0.5), p90:pct(sH, 0.9), min:sH[0], max:sH[N - 1]},
     pMiss:anyMiss / N, pNS:anyNS / N, pSteelDown:steelDown / N, makeups:makeups / N, pExtraRl:extraRl / N, spMiss:spMiss / N,
-    pBelow:below / N, hasSteel:steelTargets.size > 0};
+    pBelow:below / N, hasSteel:steelTargets.size > 0, ePE:tunPE / N, pPE:anyPE / N, hasTunnel:(R.tunnelRisk || []).some(r => r.n > 0)};
 }
 function mcSig(plan, o){ return JSON.stringify([plan, o.n, o.runSd, o.shotSd, o.steelMakeup, o.seed, PROFILE.division, PROFILE.time, PROFILE.hit, JSON.stringify(stage.objects).length]); }
 function drawMCHist(cv, res){
@@ -130,6 +132,7 @@ function renderMC(force){
   li('至少一發紙靶 M：' + Math.round(r.pMiss * 100) + '%；打到 no-shoot：' + Math.round(r.pNS * 100) + '%。');
   if(r.hasSteel) li('鋼靶平均補射 ' + fmt(r.makeups, 2) + ' 發；補射後仍有鋼靶沒倒：' + fmt(r.pSteelDown * 100, 1) + '%。');
   li('補射用掉額外子彈，造成計畫外定點換匣：' + fmt(r.pExtraRl * 100, 1) + '%。');
+  if(r.hasTunnel) li('礦工隧道：平均碰落 ' + fmt(r.ePE, 2) + ' 根橫條；至少碰落一根（吃 PE）：' + fmt(r.pPE * 100, 1) + '%。');
   li('HF 低於計畫期望值 ' + fmt(R.eHF, 3) + ' 的九成：' + Math.round(r.pBelow * 100) + '%。');
   out.appendChild(ul);
   const cv = el('canvas', {class:'mchist', 'aria-label':'hit factor 分布圖'}); out.appendChild(cv);

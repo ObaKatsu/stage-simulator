@@ -42,14 +42,19 @@ const OBJ = {
   wall:{label:'檔牆', prefix:'W', kind:'line'},
   area:{label:'射擊區', prefix:'A', kind:'poly'},
   faultline:{label:'邊線', prefix:'L', kind:'line'},
-  tunnel:{label:'礦工隧道', prefix:'CT', kind:'poly'},
+  tunnel:{label:'礦工隧道', prefix:'CT', kind:'line'},
   barrel:{label:'油桶', prefix:'B', kind:'point'},
   table:{label:'桌子', prefix:'TB', kind:'point'},
   door:{label:'門', prefix:'D', kind:'point'},
   start:{label:'起始位置', prefix:'S', kind:'point'},
   trigger:{label:'啟動機關', prefix:'TR', kind:'point'},
   viewpoint:{label:'視點', prefix:'V', kind:'point'},
-  prop:{label:'其他道具', prefix:'X', kind:'point'}
+  prop:{label:'其他道具', prefix:'X', kind:'point'},
+  platform:{label:'講台／平台', prefix:'PF', kind:'point'},
+  bridge:{label:'橋', prefix:'BR', kind:'line'},
+  boat:{label:'船', prefix:'BT', kind:'point'},
+  chair:{label:'椅子', prefix:'CH', kind:'point'},
+  horse:{label:'馬（鞍座、倒放油桶）', prefix:'HS', kind:'point'}
 };
 const TOOL_GROUPS = [
   [['select','選取']],
@@ -65,7 +70,7 @@ const TOOL_TIPS = {
   wall:'點檔牆與地面接觸的起點，再點終點；靠近其他檔牆或邊線時會自動吸附（綠圈）。',
   faultline:'點邊線起點，再點終點；靠近檔牆或其他邊線時會自動吸附（綠圈）。',
   area:'逐點點出射擊區頂點，點回第一點或按 Enter 完成。',
-  tunnel:'逐點點出隧道範圍，點回第一點或按 Enter 完成。'
+  tunnel:'點隧道入口中央，再點出口中央；寬度、高度與橫條間距在屬性面板調整。'
 };
 
 const $ = id => document.getElementById(id);
@@ -90,8 +95,9 @@ let measurePts = [];
 let hover = {view:null, sx:0, sy:0, world:null};
 let calibDrag = -1;
 let pendingFace = null;   // id of object waiting for a 'click to face' point
-const ROTATABLE = ['paper','noshoot','plate','table','door','prop','start','trigger','viewpoint'];
+const ROTATABLE = ['paper','noshoot','plate','table','door','prop','start','trigger','viewpoint','platform','boat','chair','horse'];
 let pendingSlide = null;
+let pendingAct = null;     // id of a moving target waiting for its activator to be clicked on the map
 let pendingOrder = null;   // {planId, stopId, list:[]} while picking a stop's shooting order  // id of a slider target waiting for its end point
 const MECH_TYPES = [['static','固定靶'],['swinger','搖擺靶'],['monkey','猴子靶'],['disappear','消失靶'],['slider','滑輪靶'],['other','其他機關靶']];
 const MECH_SHORT = {swinger:'擺', monkey:'猴', disappear:'消', slider:'滑', other:'機'};
@@ -115,7 +121,7 @@ function newStage(){
 }
 function defaultStartCond(){
   return {gunLoc:'holster', gunObj:null, gunNote:'', ready:'loaded', magLoc:'gun', magObj:null,
-          spareLoc:'body', spareObj:null, facing:'downrange', hands:'sides', handsObj:null, note:'', auto:false};
+          spareLoc:'body', spareObj:null, facing:'downrange', hands:'sides', handsObj:null, note:'', auto:false, pose:'stand', seatObj:null, after:'rise'};
 }
 // the user's common equipment (can be edited in the venue set)
 const COMMON_ITEMS = [
@@ -214,6 +220,7 @@ function loadStage(){
     const raw = localStorage.getItem(LS_STAGE);
     if(raw){ stage = Object.assign(newStage(), JSON.parse(raw)); if(!Array.isArray(stage.objects)) stage.objects = []; }
     stage.objects.forEach(o => { if(o.type === 'noshoot' && o.cover && o.dz === undefined){ o.dz = -targetSpec(o.size).h / 2; o.mount = 'lower'; } });
+    migrateObjects(stage.objects);
     stage.startCond = Object.assign(defaultStartCond(), stage.startCond || {});
     stage.eye = Object.assign({stand:1.68, kneel:1.05}, stage.eye || {}); if(stage.eye.stand === 1.6) stage.eye.stand = 1.68;
 
@@ -659,6 +666,7 @@ function createPointObj(type, x, y){
   if(type === 'table'){ const v = venueDims('table'); o.w = v && v.dims.w ? v.dims.w : 0.9; o.dp = v && v.dims.dp ? v.dims.dp : 0.6; o.h = v && v.dims.h ? v.dims.h : 0.75; o.est = !(v && v.dims.w); }
   if(type === 'door'){ const v = venueDims('door'); o.w = v && v.dims.w ? v.dims.w : 0.8; o.h = v && v.dims.h ? v.dims.h : 1.8; o.est = !(v && v.dims.w); }
   if(type === 'prop'){ o.name = '道具'; o.w = 0.5; o.dp = 0.5; o.h = 0.5; }
+  if(PERCH_DEF[type]) Object.assign(o, PERCH_DEF[type], {est:true});
   if(type === 'trigger'){ o.trig = 'laser'; o.len = 1.0; }
   if(type === 'paper' || type === 'noshoot') o.mech = newMech();
   if(['paper','noshoot','popper','plate','stopplate'].includes(type)) defaultRot(o);
@@ -668,7 +676,127 @@ function createPointObj(type, x, y){
 function createLineObj(type, a, b){
   const o = {id:uid(), type, label:nextLabel(type), x1:a[0], y1:a[1], x2:b[0], y2:b[1]};
   if(type === 'wall'){ o.h = null; o.t = 0.05; o.ports = []; wallFromSpec(o, venueItems('wall')[0]); }
+  if(type === 'tunnel') Object.assign(o, TUNNEL_DEF);
+  if(type === 'bridge') Object.assign(o, PERCH_DEF.bridge, {est:true});
   return o;
+}
+/* ---------- things to stand or sit on: podium / platform, bridge, boat, chair, horse ----------
+   surface: height the shooter stands on; seat: height the shooter sits (or straddles) on. Sizes are estimates. */
+const PERCH_DEF = {
+  platform:{w:1.0, dp:1.0, h:0.4},
+  bridge:{w:0.6, h:0.4},
+  boat:{w:1.0, dp:2.2, h:0.2, rim:0.6, seat:0.45},
+  chair:{w:0.45, dp:0.45, seat:0.45},
+  horse:{w:0.5, dp:1.0, seat:0.8}
+};
+function boatHull(o){   // bow points along the object's facing
+  const f = facing(o.rot || 0), p = [-f[1], f[0]], L = o.dp || 2.2, W = o.w || 1.0;
+  const P = (a, b) => [o.x + f[0]*a + p[0]*b, o.y + f[1]*a + p[1]*b];
+  return [P(-L/2, -W/2), P(L/4, -W/2), P(L/2, 0), P(L/4, W/2), P(-L/2, W/2)];
+}
+function inPoly(x, y, P){ let c = false; for(let i = 0, j = P.length - 1; i < P.length; j = i++){ const a = P[i], b = P[j]; if(((a[1] > y) !== (b[1] > y)) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
+function perchFootprint(o){
+  if(o.type === 'bridge'){ const L = Math.hypot(o.x2 - o.x1, o.y2 - o.y1) || 1e-6, u = [(o.x2 - o.x1)/L, (o.y2 - o.y1)/L], n = [-u[1], u[0]], w = (o.w || 0.6)/2;
+    return [[o.x1 + n[0]*w, o.y1 + n[1]*w], [o.x2 + n[0]*w, o.y2 + n[1]*w], [o.x2 - n[0]*w, o.y2 - n[1]*w], [o.x1 - n[0]*w, o.y1 - n[1]*w]]; }
+  if(o.type === 'boat') return boatHull(o);
+  return rectPts(o.x, o.y, o.w || 0.5, o.dp || 0.5, o.rot || 0);
+}
+// height of what the shooter stands on at (x, y): platform top, bridge deck, boat floor; 0 on the ground
+function surfaceAt(x, y){
+  let h = 0;
+  stage.objects.forEach(o => { if((o.type === 'platform' || o.type === 'bridge' || o.type === 'boat') && (o.type !== 'bridge' || o.x1 != null) && inPoly(x, y, perchFootprint(o))) h = Math.max(h, o.h || 0); });
+  return h;
+}
+// a seat at (x, y): chair, boat bench or horse (straddled); within 40 cm of the object
+function seatAt(x, y){
+  let best = null, bd = 0.4;
+  stage.objects.forEach(o => {
+    if(o.type !== 'chair' && o.type !== 'boat' && o.type !== 'horse') return;
+    const d = inPoly(x, y, perchFootprint(o)) ? 0 : Math.hypot(o.x - x, o.y - y);
+    if(d <= bd){ bd = d; best = o; }
+  });
+  return best ? {obj:best, h:best.seat || 0.45, straddle:best.type === 'horse'} : null;
+}
+function drawPerchTop(ctx, toS, o, hi){
+  if(o.type === 'bridge' && o.x1 == null) return;
+  const P = perchFootprint(o), fill = {platform:'rgba(150,120,80,.30)', bridge:'rgba(150,120,80,.30)', boat:'rgba(70,110,150,.25)', chair:'rgba(120,90,60,.35)', horse:'rgba(184,67,58,.30)'}[o.type];
+  if(pathW(ctx, toS, P, true)){ ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = hi || COL.board; ctx.lineWidth = 2; ctx.stroke(); }
+  if(o.type === 'chair'){ const f = facing(o.rot || 0), pp = [-f[1], f[0]], w = (o.w || 0.45)/2, b = -(o.dp || 0.45)/2;
+    if(pathW(ctx, toS, [[o.x + f[0]*b - pp[0]*w, o.y + f[1]*b - pp[1]*w], [o.x + f[0]*b + pp[0]*w, o.y + f[1]*b + pp[1]*w]])){ ctx.strokeStyle = hi || COL.ink; ctx.lineWidth = 3; ctx.stroke(); } }
+  const c = o.type === 'bridge' ? [(o.x1 + o.x2)/2, (o.y1 + o.y2)/2] : [o.x, o.y];
+  const hh = o.type === 'chair' || o.type === 'horse' ? '座高 ' + Math.round((o.seat || 0.45)*100) : '高 ' + Math.round((o.h || 0)*100);
+  labelAt(ctx, toS, o.label + ' ' + OBJ[o.type].label.replace(/（.*）/, '') + ' ' + hh, c[0], c[1], '#7A5424');
+}
+function renderPerchProps(p, o, upd){
+  const num = (lab, k, min) => numField(lab, o[k], 100, v => { if(v != null && v >= (min || 0)){ o[k] = v; o.est = false; upd(false); } }, '1');
+  if(o.type === 'platform') p.appendChild(row(num('寬（公分）', 'w', 0.2), num('深（公分）', 'dp', 0.2), num('高（公分）', 'h', 0.05)));
+  if(o.type === 'bridge') p.appendChild(row(num('寬（公分）', 'w', 0.2), num('高（公分）', 'h', 0.05)));
+  if(o.type === 'boat'){ p.appendChild(row(num('寬（公分）', 'w', 0.4), num('長（公分）', 'dp', 0.8))); p.appendChild(row(num('船底高（公分）', 'h', 0), num('船舷高（公分）', 'rim', 0.1), num('座板高（公分）', 'seat', 0.1))); }
+  if(o.type === 'chair') p.appendChild(row(num('座面高（公分）', 'seat', 0.2), num('寬（公分）', 'w', 0.2)));
+  if(o.type === 'horse') p.appendChild(row(num('鞍座高（公分）', 'seat', 0.3), num('長（公分）', 'dp', 0.4)));
+  const use = {platform:'站上去射擊，眼高會加上平台高度。', bridge:'由一端點到另一端；可走過或在橋上射擊，眼高會加上橋面高度，上下橋的時間計入移動。', boat:'固定不動的船；可站在船上（眼高加船底高）或坐在座板上（路線計畫姿勢選「坐姿」）。船舷會遮擋低的視線。', chair:'坐姿起始或坐著射擊用：起始條件選「坐在椅子、船上」，或路線計畫姿勢選「坐姿」。', horse:'跨坐用（馬、鞍座或倒放的油桶）：起始條件選「跨坐」，或路線計畫姿勢選「坐姿」。'}[o.type];
+  p.appendChild(el('p', {class:'help', text:use + '尺寸與上下、起身時間為估計值，請依現場修改（時間在射手參數）。'}));
+}
+/* ---------- Cooper tunnel ----------
+   A low frame (inverted U) along a centre line from entrance to exit. Loose slats rest across the two
+   side rails at the top; knocking one down costs a procedural error each (per the WSB). */
+const TUNNEL_DEF = {w:0.9, h:1.3, slat:0.25, sides:'open', knockP:0.03};
+const TUNNEL_SIDES = [['open','開放框架（看得穿）'],['mesh','鐵網（看得穿）'],['panel','封板（擋視線）']];
+function tunnelGeom(o){
+  const L = Math.hypot(o.x2 - o.x1, o.y2 - o.y1) || 1e-6, u = [(o.x2 - o.x1) / L, (o.y2 - o.y1) / L], n = [-u[1], u[0]], w = o.w || TUNNEL_DEF.w;
+  const P = (s, q) => [o.x1 + u[0]*s + n[0]*q, o.y1 + u[1]*s + n[1]*q];
+  const nSlat = Math.max(1, Math.floor(L / (o.slat || TUNNEL_DEF.slat)) + 1);
+  const slats = []; for(let i = 0; i < nSlat; i++) slats.push(nSlat === 1 ? L/2 : (L * i) / (nSlat - 1));
+  return {L, u, n, w, h:o.h || TUNNEL_DEF.h, P, corners:[P(0, -w/2), P(L, -w/2), P(L, w/2), P(0, w/2)], slats};
+}
+// part of the segment a->b that runs inside the tunnel footprint, and how many slats it passes under
+function tunnelInside(o, a, b){
+  const g = tunnelGeom(o), loc = p => [(p[0] - o.x1)*g.u[0] + (p[1] - o.y1)*g.u[1], (p[0] - o.x1)*g.n[0] + (p[1] - o.y1)*g.n[1]];
+  const A = loc(a), B = loc(b), d = [B[0] - A[0], B[1] - A[1]];
+  let t0 = 0, t1 = 1;
+  const clip = (p, q) => { if(Math.abs(p) < 1e-12) return q >= 0; const r = q / p; if(p < 0){ if(r > t1) return false; if(r > t0) t0 = r; } else { if(r < t0) return false; if(r < t1) t1 = r; } return true; };
+  if(!(clip(-d[0], A[0]) && clip(d[0], g.L - A[0]) && clip(-d[1], A[1] + g.w/2) && clip(d[1], g.w/2 - A[1]))) return {len:0, slats:0, idx:[]};
+  const len = Math.hypot(d[0], d[1]) * Math.max(0, t1 - t0);
+  const s0 = A[0] + d[0]*t0, s1 = A[0] + d[0]*t1, lo = Math.min(s0, s1), hi = Math.max(s0, s1);
+  const idx = []; g.slats.forEach((s, i) => { if(len > 0.05 && s >= lo - 1e-6 && s <= hi + 1e-6) idx.push(i); });
+  return {len, slats:idx.length, idx};
+}
+function inTunnel(x, y){
+  return stage.objects.find(o => { if(o.type !== 'tunnel' || o.x1 == null) return false; const g = tunnelGeom(o); const s = (x - o.x1)*g.u[0] + (y - o.y1)*g.u[1], q = (x - o.x1)*g.n[0] + (y - o.y1)*g.n[1]; return s >= 0 && s <= g.L && Math.abs(q) <= g.w/2; }) || null;
+}
+// older files stored the tunnel as a polygon: turn it into an entrance-to-exit centre line with a width
+function migrateObjects(objs){
+  (objs || []).forEach(o => {
+    if(o.type === 'tunnel' && Array.isArray(o.pts) && o.x1 == null && o.pts.length >= 3){
+      let best = [1, 0], bl = 0;
+      o.pts.forEach((p, i) => { const q = o.pts[(i+1) % o.pts.length], l = Math.hypot(q[0] - p[0], q[1] - p[1]); if(l > bl){ bl = l; best = [(q[0] - p[0]) / l, (q[1] - p[1]) / l]; } });
+      const n = [-best[1], best[0]], su = o.pts.map(p => p[0]*best[0] + p[1]*best[1]), sn = o.pts.map(p => p[0]*n[0] + p[1]*n[1]);
+      const u0 = Math.min(...su), u1 = Math.max(...su), n0 = Math.min(...sn), n1 = Math.max(...sn), nm = (n0 + n1) / 2;
+      o.x1 = best[0]*u0 + n[0]*nm; o.y1 = best[1]*u0 + n[1]*nm; o.x2 = best[0]*u1 + n[0]*nm; o.y2 = best[1]*u1 + n[1]*nm;
+      Object.keys(TUNNEL_DEF).forEach(k => { if(o[k] == null) o[k] = TUNNEL_DEF[k]; }); o.w = Math.max(0.4, n1 - n0); delete o.pts;
+    }else if(o.type === 'tunnel') Object.keys(TUNNEL_DEF).forEach(k => { if(o[k] == null) o[k] = TUNNEL_DEF[k]; });
+  });
+}
+function drawTunnelTop(ctx, toS, o, hi){
+  if(o.x1 == null) return;
+  const g = tunnelGeom(o);
+  if(pathW(ctx, toS, g.corners, true)){ ctx.fillStyle = 'rgba(185,139,78,.18)'; ctx.fill(); }
+  const seg = (a, b, col, lw, dash) => { const p = toS(a[0], a[1]), q = toS(b[0], b[1]); if(!p || !q) return; ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.setLineDash(dash || []); ctx.stroke(); ctx.setLineDash([]); };
+  g.slats.forEach(s => seg(g.P(s, -g.w/2 - 0.04), g.P(s, g.w/2 + 0.04), 'rgba(140,100,50,.85)', 1.2));
+  seg(g.P(0, -g.w/2), g.P(g.L, -g.w/2), hi || COL.board, o.sides === 'panel' ? 4 : 2.5);
+  seg(g.P(0, g.w/2), g.P(g.L, g.w/2), hi || COL.board, o.sides === 'panel' ? 4 : 2.5);
+  seg(g.P(-0.3, 0), g.P(0.1, 0), hi || COL.board, 1.5, [3, 3]);
+  labelAt(ctx, toS, o.label + ' 礦工隧道 高 ' + Math.round(g.h*100) + ' 公分', ...g.P(g.L/2, 0), COL.board);
+}
+function renderTunnelProps(p, o, upd){
+  const g = tunnelGeom(o);
+  p.appendChild(row(numField('高度（公分）', o.h, 100, v => { if(v > 0.3){ o.h = v; upd(false); } }, '1'),
+                    numField('寬度（公分）', o.w, 100, v => { if(v > 0.3){ o.w = v; upd(false); } }, '1')));
+  p.appendChild(row(numField('橫條間距（公分）', o.slat, 100, v => { if(v > 0.05){ o.slat = v; upd(false); } }, '1'),
+                    selField('兩側', TUNNEL_SIDES, o.sides || 'open', v => { o.sides = v; upd(false); })));
+  p.appendChild(numField('每通過一根橫條的碰落機率（%）', o.knockP, 100, v => { if(v != null && v >= 0 && v <= 1){ o.knockP = v; upd(false); } }, '0.5'));
+  p.appendChild(el('div', {class:'readout', text:'長 ' + fmt(g.L) + ' 公尺，頂部 ' + g.slats.length + ' 根鬆放的橫條。'}));
+  p.appendChild(el('p', {class:'help', text:'由入口中央點到出口中央。頂部橫條只是放在兩側框架上，碰落一根記一個 PE（依 WSB 規定）。路線計畫會：檢查在隧道內停頓時頭頂是否高過隧道、以「礦工隧道內移動速度」計算穿越時間、依通過的橫條數與碰落機率估計 PE 扣分。碰落機率為估計值，姿勢越低、動作越穩，機率越低，請依自己的經驗調整。'}));
 }
 function createPolyObj(type, pts){ return {id:uid(), type, label:nextLabel(type), pts:pts.map(p => [p[0], p[1]])}; }
 function nearestPaper(x, y, maxD){
@@ -786,7 +914,7 @@ function snapWorld(w, sx, sy, toS, excludeId){
   let best = null, bd = 12;
   stage.objects.forEach(o => {
     if(o.id === excludeId) return;
-    const cand = (o.type === 'wall' || o.type === 'faultline') ? [[o.x1, o.y1], [o.x2, o.y2]] : (o.type === 'area' && !o.auto) || o.type === 'tunnel' ? o.pts : [];
+    const cand = (o.type === 'wall' || o.type === 'faultline') ? [[o.x1, o.y1], [o.x2, o.y2]] : (o.type === 'area' && !o.auto) ? o.pts : [];
     cand.forEach(p => { const q = toS(p[0], p[1]); if(!q) return; const d = Math.hypot(q[0] - sx, q[1] - sy); if(d < bd){ bd = d; best = [p[0], p[1]]; } });
   });
   if(best) return {w:best, snap:best};
@@ -803,7 +931,7 @@ function snapWorld(w, sx, sy, toS, excludeId){
   });
   return best ? {w:best, snap:best} : {w, snap:null};
 }
-const SNAP_TOOLS = ['wall','faultline','area','tunnel'];
+const SNAP_TOOLS = ['wall','faultline','area'];
 function isBoundaryLine(o){ return stage.objects.some(a => a.type === 'area' && a.auto && (a.refs || []).includes(o.id)); }
 
 /* ---------- drawing (shared by both views) ---------- */
@@ -841,7 +969,8 @@ function drawObj(ctx, toS, o, selected){
       }
       if(o.pts.length) labelAt(ctx, toS, o.label, ...centroid(o.pts), COL.tape);
       break;
-    case 'tunnel':
+    case 'tunnel': { drawTunnelTop(ctx, toS, o, hi); break; }
+    case 'tunnelOld':
       if(pathW(ctx, toS, o.pts, true)){ ctx.fillStyle = 'rgba(185,139,78,.25)'; ctx.fill(); ctx.setLineDash([6,4]); ctx.strokeStyle = hi || COL.board; ctx.lineWidth = 2; ctx.stroke(); ctx.setLineDash([]); }
       if(o.pts.length) labelAt(ctx, toS, o.label + ' 礦工隧道', ...centroid(o.pts), COL.board);
       break;
@@ -914,6 +1043,7 @@ function drawObj(ctx, toS, o, selected){
       labelAt(ctx, toS, o.label, o.x, o.y, o.type === 'stopplate' ? COL.tape : COL.ink);
       break;
     }
+    case 'platform': case 'boat': case 'chair': case 'horse': case 'bridge': drawPerchTop(ctx, toS, o, hi); break;
     case 'table': case 'prop':
       if(pathW(ctx, toS, rectPts(o.x, o.y, o.w, o.dp, o.rot), true)){ ctx.fillStyle = 'rgba(185,139,78,.3)'; ctx.fill(); ctx.strokeStyle = hi || COL.board; ctx.lineWidth = 2; ctx.stroke(); }
       labelAt(ctx, toS, o.type === 'prop' ? (o.name || o.label) : o.label, o.x, o.y, '#7A5424');
@@ -1238,7 +1368,7 @@ function setHandle(o, i, w){
   else if(k === 'poly'){ o.pts[i] = [w[0], w[1]]; }
 }
 function finishDraft(){
-  if(draft && (draft.type === 'area' || draft.type === 'tunnel') && draft.pts.length >= 3){
+  if(draft && draft.type === 'area' && draft.pts.length >= 3){
     const o = createPolyObj(draft.type, draft.pts); draft = null; addObj(o);
   }
 }
@@ -1257,7 +1387,7 @@ function makeHandlers(name, view, toS, toW){
         renderList(); renderProps(); renderViews();
         return true;
       }
-      if(tool !== 'select' || pendingFace || pendingSlide || pendingOrder) return false;
+      if(tool !== 'select' || pendingFace || pendingSlide || pendingOrder || pendingAct) return false;
       const ps = planStopHit(sx, sy, toS);
       if(ps){ drag = {handle:-20, stop:ps}; return true; }
       const h = hitTest(sx, sy, toS);
@@ -1318,6 +1448,14 @@ function makeHandlers(name, view, toS, toW){
         }
         return;
       }
+      if(pendingAct){
+        const o = getObj(pendingAct); pendingAct = null;
+        let best = null, bd = 0.7;
+        stage.objects.forEach(a => { if(!ACTIVATOR_TYPES.includes(a.type) || a === o) return; const d = Math.hypot(a.x - w[0], a.y - w[1]); if(d < bd){ bd = d; best = a; } });
+        if(o && best){ o.mech.act = {mode:'object', id:best.id, delay:(o.mech.act && o.mech.act.delay) || 0}; selId = o.id; objectsChanged(false); }
+        else if(o) alert('點的位置附近沒有可當啟動來源的物件（鋼靶、Falling Plate、啟動機關、門或道具）。');
+        setTool(tool); renderProps(); return;
+      }
       if(pendingSlide){
         const o = getObj(pendingSlide); pendingSlide = null;
         if(o && o.mech){ o.mech.ex = w[0]; o.mech.ey = w[1]; selId = o.id; objectsChanged(true); }
@@ -1333,20 +1471,28 @@ function makeHandlers(name, view, toS, toW){
         if(measurePts.length >= 2) measurePts = [];
         measurePts.push(w); updateMeasureOut(); renderViews(); return;
       }
-      if(tool === 'wall' || tool === 'faultline'){
+      if(tool === 'wall' || tool === 'faultline' || tool === 'tunnel' || tool === 'bridge'){
         if(!draft) draft = {type:tool, pts:[]};
         draft.pts.push(snapWorld(w, sx, sy, toS).w);
         if(draft.pts.length === 2){ const o = createLineObj(tool, draft.pts[0], draft.pts[1]); draft = null; addObj(o); }
         else renderViews();
         return;
       }
-      if(tool === 'area' || tool === 'tunnel'){
+      if(tool === 'area'){
         if(!draft) draft = {type:tool, pts:[]};
         if(draft.pts.length >= 3){
           const q = toS(draft.pts[0][0], draft.pts[0][1]);
           if(q && Math.hypot(q[0] - sx, q[1] - sy) < 12){ finishDraft(); return; }
         }
         draft.pts.push(snapWorld(w, sx, sy, toS).w); renderViews(); return;
+      }
+      if(MECH_TOOLS[tool]){
+        const o = createPointObj('paper', w[0], w[1]); o.mech = newMech(); o.mech.type = MECH_TOOLS[tool][0];
+        if(o.mech.type === 'swinger') o.mech.amp = 90;
+        addObj(o); setTool('select'); renderProps(); return;
+      }
+      if(TRIG_TOOLS[tool]){
+        const o = createPointObj('trigger', w[0], w[1]); o.trig = TRIG_TOOLS[tool][0]; addObj(o); return;
       }
       if(OBJ[tool]){
         if(tool === 'start'){ const s = startObj(); if(s){ s.x = w[0]; s.y = w[1]; selId = s.id; objectsChanged(true); return; } }
@@ -1377,20 +1523,26 @@ bindPointer(topView, makeHandlers('top', topView, topS, topW));
 /* ---------- toolbar ---------- */
 // one row: 選取 | 靶 ▾ 障礙物 ▾ 區域 ▾ (build mode only) | 視點 測距 | 復原 重做
 const TOOL_MENUS = [
-  ['靶', ['paper','noshoot','popper','plate','stopplate','trigger']],
+  ['靶', ['paper','noshoot','popper','plate','stopplate']],
+  ['機關', ['m_swinger','m_monkey','m_slider','m_disappear','t_laser','t_pedal','t_rope','t_other']],
   ['障礙物', ['wall','barrel','table','door','prop','tunnel']],
+  ['站坐道具', ['platform','bridge','boat','chair','horse']],
   ['區域', ['area','faultline','start']]
 ];
 const TOOL_ALWAYS = ['select', 'viewpoint', 'measure'];
-const toolLabel = k => { for(const g of TOOL_GROUPS) for(const [kk, lab] of g) if(kk === k) return lab; return k; };
-function pickTool(k){ pendingFace = null; pendingSlide = null; closeToolMenu(); setTool(tool === k && k !== 'select' ? 'select' : k); renderProps(); }
+// shortcut tools: a paper target that already carries a mechanism, or an activator of a given kind
+const MECH_TOOLS = {m_swinger:['swinger','搖擺靶'], m_monkey:['monkey','猴子靶'], m_slider:['slider','滑行靶'], m_disappear:['disappear','消失靶']};
+const TRIG_TOOLS = {t_laser:['laser','雷射感應'], t_pedal:['pedal','踏板'], t_rope:['rope','手拉機關'], t_other:['other','其他啟動機關']};
+const toolLabel = k => { if(OBJ[k] && ['platform','bridge','boat','chair','horse'].includes(k)) return OBJ[k].label; if(MECH_TOOLS[k]) return MECH_TOOLS[k][1]; if(TRIG_TOOLS[k]) return TRIG_TOOLS[k][1]; for(const g of TOOL_GROUPS) for(const [kk, lab] of g) if(kk === k) return lab; return k; };
+function pickTool(k){ pendingFace = null; pendingSlide = null; pendingAct = null; closeToolMenu(); setTool(tool === k && k !== 'select' ? 'select' : k); renderProps(); }
 function closeToolMenu(){ const d = $('toolMenu'); if(d) d.remove(); document.querySelectorAll('#toolbar .tmenu').forEach(b => b.setAttribute('aria-expanded', 'false')); }
 function openToolMenu(btn, keys){
   const was = btn.getAttribute('aria-expanded') === 'true';
   closeToolMenu(); if(was) return;
   const r = btn.getBoundingClientRect();
   const d = el('div', {id:'toolMenu', class:'tooldrop', role:'menu'});
-  d.appendChild(el('div', {class:'dd-h', text:'選好後在俯視圖或原圖上點選放置'}));
+  d.appendChild(el('div', {class:'dd-h', text:keys.includes('m_swinger') ? '機關靶放好後，在屬性面板指定啟動來源；鋼靶、Falling Plate、門也能當啟動來源' : '選好後在俯視圖或原圖上點選放置'}));
+  if(keys.includes('m_swinger')) d.classList.add('wide');
   keys.forEach(k => d.appendChild(el('button', {role:'menuitem', class:tool === k ? 'on' : '', text:toolLabel(k), onclick:() => pickTool(k)})));
   document.body.appendChild(d);
   const w = d.offsetWidth; d.style.left = Math.max(6, Math.min(window.innerWidth - w - 6, r.left)) + 'px'; d.style.top = (r.bottom + 4) + 'px';
@@ -1439,7 +1591,7 @@ function setTool(t){
   $('calibTool').classList.toggle('on', t === 'calib');
   $('calibTool').textContent = t === 'calib' ? '完成調整' : '調整校正點';
   const lab = TOOL_GROUPS.flat().find(x => x[0] === t);
-  $('toolTip').textContent = pendingSlide ? '在圖上點一下，設定滑輪靶的滑軌終點。Esc 取消。' : pendingFace ? '在圖上點一下，物件會轉向面對該點。Esc 取消。'
+  $('toolTip').textContent = pendingAct ? '在圖上點選啟動這個靶的物件（鋼靶、Falling Plate、啟動機關、門）。Esc 取消。' : pendingSlide ? '在圖上點一下，設定滑輪靶的滑軌終點。Esc 取消。' : pendingFace ? '在圖上點一下，物件會轉向面對該點。Esc 取消。'
     : TOOL_TIPS[t] || (lab ? (ROTATABLE.includes(t) ? '點一下放置' + lab[1] + '；按住拖曳可同時決定朝向（Shift 以 15 度為單位）。' : '點一下放置' + lab[1] + '。') : '');
   updateMeasureOut(); renderViews();
 }
@@ -1458,7 +1610,7 @@ document.addEventListener('keydown', e => {
   if(mod && (e.key === 'z' || e.key === 'Z')){ e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if(mod && (e.key === 'y' || e.key === 'Y')){ e.preventDefault(); redo(); return; }
   if(e.key === 'Escape' && pendingOrder){ pendingOrder = null; renderPlanPanel(); renderViews(); return; }
-  if(e.key === 'Escape'){ if(pendingFace || pendingSlide){ pendingFace = null; pendingSlide = null; setTool(tool); renderProps(); } else if(draft){ draft = null; renderViews(); } else setTool('select'); }
+  if(e.key === 'Escape'){ if(pendingFace || pendingSlide || pendingAct){ pendingFace = null; pendingSlide = null; pendingAct = null; setTool(tool); renderProps(); } else if(draft){ draft = null; renderViews(); } else setTool('select'); }
   else if(e.key === 'Enter'){ finishDraft(); }
   else if((e.key === 'Delete' || e.key === 'Backspace') && selId){ e.preventDefault(); deleteSel(); }
   else if(selId && e.key.startsWith('Arrow')){
@@ -1481,9 +1633,10 @@ function startSummary(){
   const rd = {loaded:'CON1', emptyChamber:'CON2', unloaded:'CON3'}[c.ready];
   const mag = c.ready !== 'unloaded' ? '' : c.magLoc === 'body' ? '、彈匣在身上' : c.magLoc === 'object' ? '、彈匣在' + objName(c.magObj) : '、彈匣另放';
   const spare = c.spareLoc === 'object' ? '、備用彈匣在' + objName(c.spareObj) : c.spareLoc === 'none' ? '、無備用彈匣' : '';
-  const hands = {sides:'雙手自然垂下', wrists:'手腕高於肩', onObject:'雙手放在' + objName(c.handsObj), other:'手：其他'}[c.hands];
+  const hands = {sides:'雙手自然垂下', wrists:'手腕高於肩', lap:'雙手放在大腿上', onObject:'雙手放在' + objName(c.handsObj), other:'手：其他'}[c.hands];
+  const pose = c.pose === 'seated' ? '坐在' + objName(c.seatObj) + '、' : c.pose === 'straddle' ? '跨坐在' + objName(c.seatObj) + '、' : '';
   const face = {downrange:'面向靶擋', uprange:'背向靶擋', other:'面向：其他'}[c.facing];
-  return gun + '（' + rd + '）' + mag + spare + '；' + face + '、' + hands;
+  return gun + '（' + rd + '）' + mag + spare + '；' + pose + face + '、' + hands + (c.pose && c.pose !== 'stand' ? (c.after === 'stay' ? '，坐著射擊' : '，' + (c.pose === 'straddle' ? '下馬' : '起身') + '後出槍') : '');
 }
 // key used by the time model (phase 3) to pick the matching start-time parameter
 function startKey(){
@@ -1491,6 +1644,28 @@ function startKey(){
   return [c.gunLoc === 'object' ? (getObj(c.gunObj)?.type || 'object') : c.gunLoc, c.ready,
           c.ready === 'unloaded' ? (c.magLoc === 'object' ? (getObj(c.magObj)?.type || 'object') : c.magLoc) : 'gun',
           c.facing, c.hands].join('|');
+}
+/* beep to first shot: the shooter's draw / pick-up speed, or a time set for this stage (handy for CON2, CON3) */
+function renderFirstShot(box, c, upd){
+  if(typeof startParts !== 'function' || !PROFILE.time) return;   // shooter parameters not loaded yet (early init)
+  const T = PROFILE.time, d = el('div', {class:'port'});
+  const sh = SHOOTERS && SHOOTERS.list.find(x => x.id === SHOOTERS.activeId), who = (sh ? sh.name : '目前射手') + '・' + divInfo(PROFILE.division).name + ' 組別';
+  d.appendChild(el('div', {class:'kind', text:'嗶聲到第一槍'}));
+  d.appendChild(row(
+    numField('出槍到第一槍（槍在身上，秒）', T.startHolster, 1, v => { if(v > 0){ PROFILE.time.startHolster = v; saveProfile(); if(typeof renderParamBox === 'function') renderParamBox(); upd(); } }, '0.05'),
+    numField('取槍到第一槍（槍在物件上，秒）', T.startPickup, 1, v => { if(v > 0){ PROFILE.time.startPickup = v; saveProfile(); if(typeof renderParamBox === 'function') renderParamBox(); upd(); } }, '0.05')));
+  d.appendChild(el('p', {class:'help', text:'這兩項是射手參數（' + who + '），所有 stage 共用，射手視窗也可修改。'}));
+  const custom = c.firstShot != null && c.firstShot > 0, auto = startTimeAuto();
+  d.appendChild(selField('這個 stage 的第一槍時間', [['auto','依射手參數計算'],['custom','自行設定秒數']], custom ? 'custom' : 'auto',
+    v => { c.firstShot = v === 'custom' ? Math.round(auto * 100) / 100 : null; upd(); }));
+  if(custom){
+    d.appendChild(numField('嗶聲到第一槍（秒）', c.firstShot, 1, v => { if(v > 0){ c.firstShot = v; upd(); } }, '0.05'));
+    d.appendChild(el('div', {class:'readout', text:'依射手參數計算為 ' + fmt(auto) + ' 秒；目前使用自行設定的 ' + fmt(c.firstShot) + ' 秒。'}));
+    d.appendChild(el('p', {class:'help', text:'自行設定後，直接以這個秒數作為嗶聲到第一槍的時間，不再另加 CON2、CON3 上膛入匣或背向轉身的時間；只套用在這個 stage。改變射手的出槍、取槍參數（或比較標竿射手）時，這個 stage 的第一槍時間不會跟著變。'}));
+  }else{
+    d.appendChild(el('div', {class:'readout', text:startParts().map(x => x[0] + ' ' + fmt(x[1])).join(' ＋ ') + ' ＝ ' + fmt(auto) + ' 秒'}));
+  }
+  box.appendChild(d);
 }
 function renderStartCond(){
   const box = $('startBox'); if(!box) return;
@@ -1515,8 +1690,20 @@ function renderStartCond(){
 
   box.appendChild(row(
     selField('面向', [['downrange','面向靶擋'],['uprange','背向靶擋'],['other','其他']], c.facing, v => { c.facing = v; upd(); }),
-    selField('手的位置', [['sides','自然垂下'],['wrists','手腕高於肩'],['onObject','放在物件上'],['other','其他']], c.hands, v => { c.hands = v; fixObj('hands','handsObj'); if(v === 'onObject' && !getObj(c.handsObj)) c.handsObj = hs[0] ? hs[0].id : null; upd(); })));
+    selField('手的位置', [['sides','自然垂下'],['wrists','手腕高於肩'],['lap','放在大腿上'],['onObject','放在物件上'],['other','其他']], c.hands, v => { c.hands = v; fixObj('hands','handsObj'); if(v === 'onObject' && !getObj(c.handsObj)) c.handsObj = hs[0] ? hs[0].id : null; upd(); })));
   if(c.hands === 'onObject') box.appendChild(selField('手放在哪個物件', objOpts, c.handsObj || '', v => { c.handsObj = v || null; upd(); }));
+  // seated or straddling start (chair, boat, horse); either rise first or shoot from the seat
+  const seats = stage.objects.filter(o => ['chair','boat','horse','barrel'].includes(o.type));
+  box.appendChild(selField('起始姿勢', [['stand','站立'],['seated','坐在椅子或船上'],['straddle','跨坐（馬、鞍座、倒放油桶）']], c.pose || 'stand', v => {
+    c.pose = v; if(v !== 'stand' && !getObj(c.seatObj)){ const pref = seats.find(o => v === 'straddle' ? (o.type === 'horse' || o.type === 'barrel') : (o.type === 'chair' || o.type === 'boat')); c.seatObj = pref ? pref.id : null; } upd(); }));
+  if(c.pose && c.pose !== 'stand'){
+    box.appendChild(row(
+      selField('坐在哪個物件', seats.length ? seats.map(o => [o.id, objName(o.id)]) : [['', '（圖上尚無椅子、船或馬）']], c.seatObj || '', v => { c.seatObj = v || null; upd(); }),
+      selField('開始訊號後', [['rise','先' + (c.pose === 'straddle' ? '下馬' : '起身') + '再出槍'],['stay','坐著出槍射擊']], c.after || 'rise', v => { c.after = v; upd(); })));
+    if(!getObj(c.seatObj)) box.appendChild(warn('請先用工具列「站坐道具」放置椅子、船或馬，再回來選擇。'));
+    else if(c.after === 'stay') box.appendChild(el('p', {class:'help', text:'坐著射擊：路線計畫第一個停頓點請放在座位上，姿勢選「坐姿」。'}));
+  }
+  renderFirstShot(box, c, upd);
   const n = el('input', {type:'text', placeholder:'例如：雙腳腳跟接觸標記'}); n.value = c.note;
   n.addEventListener('change', () => { c.note = n.value; upd(); });
   box.appendChild(el('div', null, el('label', {class:'f', text:'其他條件'}), n));
@@ -1528,7 +1715,12 @@ function renderStartCond(){
   box.appendChild(el('div', {class:'msg ok', text:startSummary()}));
   $('stStart').textContent = c.gunLoc === 'holster' && c.ready === 'loaded' ? '預設' : '已設定';
 }
-function commitAndRefreshStart(){ renderStartCond(); renderViews(); saveStage(); }
+function commitAndRefreshStart(){
+  renderStartCond(); renderViews(); saveStage();
+  // the start condition changes the first shot time: recompute plans and an open replay
+  if(typeof renderPlanPanel === 'function'){ planCache = null; renderPlanPanel(); if(typeof renderResultsPanel === 'function') renderResultsPanel(); }
+  layoutChanged();
+}
 function drawStartBadges(ctx, toS){
   const c = stage.startCond, tags = {};
   const add = (id, t) => { if(id && getObj(id)) (tags[id] = tags[id] || []).push(t); };
@@ -1575,6 +1767,8 @@ function renderProps(){
   if(typeof renderVisPanel === 'function') setTimeout(renderVisPanel, 0);
   const box = $('propsBox'); box.innerHTML = '';
   const o = getObj(selId);
+  if(o && selId !== renderProps.last && document.body.dataset.mode === 'build'){ const so = $('secObj'); if(so && !so.open) so.open = true; }   // show the properties of what was just picked or placed
+  renderProps.last = selId;
   if(!o){ box.appendChild(el('p', {class:'help', text:'尚未選取物件。用「選取」工具點物件即可編輯。'})); return; }
   const def = OBJ[o.type];
   const upd = (extent) => objectsChanged(extent);
@@ -1588,8 +1782,8 @@ function renderProps(){
   if(def.kind === 'point'){
     p.appendChild(row(numField('x（公尺）', o.x, 1, v => { if(v != null){ o.x = v; upd(true); } }, '0.01'),
                       numField('y（公尺）', o.y, 1, v => { if(v != null){ o.y = v; upd(true); } }, '0.01')));
-    if(['paper','noshoot','plate','table','door','prop','start'].includes(o.type)){
-      const rf = numField('旋轉（度，0 為正面朝前方，順時針為正）', o.rot || 0, 1, v => { o.rot = normDeg(v || 0); upd(false); }, '1');
+    if(['paper','noshoot','plate','table','door','prop','start','trigger','platform','boat','chair','horse'].includes(o.type)){
+      const rf = numField({boat:'船頭方向（度，0 為朝前方，順時針為正）', chair:'座椅面向（度，0 為朝前方，順時針為正；椅背在後）', horse:'馬頭方向（度，0 為朝前方，順時針為正）'}[o.type] || '旋轉（度，0 為正面朝前方，順時針為正）', o.rot || 0, 1, v => { o.rot = normDeg(v || 0); upd(false); }, '1');
       rf.querySelector('input').id = 'rotField';
       p.appendChild(rf);
       const s = startObj();
@@ -1638,7 +1832,7 @@ function renderProps(){
       if(o.d < RULE_SPECS.fallingPlate.min - 1e-9 || o.d > RULE_SPECS.fallingPlate.max + 1e-9) p.appendChild(warn('規則書規定Falling Plate為 10 到 20 公分。'));
       break;
     case 'viewpoint':
-      p.appendChild(row(selField('姿勢', POSTURE_ORDER.map(k => [k, POSTURE_NAME[k]]).concat([['custom','自訂眼高']]), o.stance, v => { o.stance = v; upd(false); }),
+      p.appendChild(row(selField('姿勢', STANCE_OPTS().concat([['custom','自訂眼高']]), o.stance, v => { o.stance = v; upd(false); }),
                         numField('眼高（公分）', eyeOf(o), 100, v => { if(v){ o.eyeH = v; o.stance = 'custom'; upd(false); } }, '1')));
       p.appendChild(el('p', {class:'help', text:'視點的朝向代表射手面對的方向，影響方位角與 3D 射手視角。視線分析結果顯示在左側「視線分析」。'}));
       break;
@@ -1710,7 +1904,9 @@ function renderProps(){
       }
       break;
     }
-    case 'area': case 'tunnel':
+    case 'tunnel': renderTunnelProps(p, o, upd); break;
+    case 'platform': case 'bridge': case 'boat': case 'chair': case 'horse': renderPerchProps(p, o, upd); break;
+    case 'area':
       p.appendChild(el('div', {class:'readout', text:o.pts.length + ' 個頂點，面積 ' + fmt(polyArea(o.pts), 1) + ' 平方公尺'}));
       if(o.auto) p.appendChild(el('div', {class:'help', text:'由檔牆與邊線自動產生。移動檔牆或邊線後，請再按一次「由檔牆與邊線產生射擊區」更新。'}));
       break;
@@ -1800,13 +1996,15 @@ function renderMechProps(p, o, upd){
       if(m.ex != null) d.appendChild(el('div', {class:'readout', text:'滑軌長度 ' + fmt(Math.hypot(m.ex - o.x, m.ey - o.y)) + ' 公尺（靶的目前位置為起點）'}));
       d.appendChild(numField('滑完全程（秒）', m.travel, 1, v => { m.travel = v; upd(false); }, '0.1'));
     }
-    if(m.type === 'monkey' || m.type === 'other') d.appendChild(el('p', {class:'help', text:'目前以可見時間窗描述，動作細節可寫在下方備註。'}));
+    if(m.type === 'monkey' || m.type === 'other' || m.type === 'disappear') d.appendChild(el('p', {class:'help', text:'目前以可見時間窗描述，動作細節可寫在下方備註。'}));
     const acts = stage.objects.filter(x => ACTIVATOR_TYPES.includes(x.type));
-    d.appendChild(selField('啟動方式', [['none','未設定'],['start','隨開始訊號啟動'],['object','由啟動機關、鋼靶或Falling Plate啟動']], m.act.mode, v => {
+    d.appendChild(el('div', {class:'btns'}, el('button', {class:pendingAct === o.id ? 'on' : 'primary', text:pendingAct === o.id ? '取消點選' : '在圖上點選啟動來源',
+      onclick:() => { pendingAct = pendingAct === o.id ? null : o.id; pendingFace = null; pendingSlide = null; setTool('select'); renderProps(); }})));
+    d.appendChild(selField('啟動方式', [['none','未設定'],['start','隨開始訊號啟動'],['object','由鋼靶、Falling Plate、啟動機關、門或道具啟動']], m.act.mode, v => {
       m.act.mode = v; if(v === 'object' && !getObj(m.act.id)) m.act.id = acts[0] ? acts[0].id : null; upd(false);
     }));
     if(m.act.mode === 'object'){
-      d.appendChild(selField('由哪個物件啟動', acts.length ? acts.map(a => [a.id, actName(a.id)]) : [['', '（圖上尚無啟動機關、鋼靶或Falling Plate）']], m.act.id || '', v => { m.act.id = v || null; upd(false); }));
+      d.appendChild(selField('由哪個物件啟動', acts.length ? acts.map(a => [a.id, actName(a.id)]) : [['', '（圖上尚無鋼靶、Falling Plate 或啟動機關）']], m.act.id || '', v => { m.act.id = v || null; upd(false); }));
       d.appendChild(numField('啟動延遲（秒）', m.act.delay, 1, v => { m.act.delay = v || 0; upd(false); }, '0.1'));
       if(!getObj(m.act.id)) d.appendChild(warn('請先放置「啟動機關」，或指定鋼靶、Falling Plate作為啟動來源。'));
     }
@@ -1825,7 +2023,8 @@ function renderActivatorProps(p, o, upd){
     if(o.trig === 'laser') d.appendChild(numField('感應線長度（公尺）', o.len, 1, v => { o.len = v || 1; upd(false); }, '0.1'));
   }
   const targets = stage.objects.filter(x => x.type === 'paper' || x.type === 'noshoot');
-  d.appendChild(el('div', {class:'kind', text:'這個物件啟動哪些靶'}));
+  d.appendChild(el('div', {class:'kind', text:'擊倒或觸發後，啟動哪些靶'}));
+  if(o.type === 'popper' || o.type === 'plate') d.appendChild(el('p', {class:'help', text:'鋼靶、Falling Plate 被 BB 擊倒時啟動；勾選的靶從擊中時起算（再加各靶的啟動延遲）。'}));
   if(!targets.length) d.appendChild(el('p', {class:'help', text:'圖上尚無紙靶。'}));
   targets.forEach(t => {
     const linked = isMech(t) && t.mech.act.mode === 'object' && t.mech.act.id === o.id;
@@ -2298,6 +2497,7 @@ function importStage(o){
   afterSourceChange();
 }
 function afterSourceChange(){
+  migrateObjects(stage.objects);
   if(typeof resetForNewStage === 'function') resetForNewStage();
   fillInputs(); setTool('select'); renderList(); renderProps(); renderStartCond(); syncDesignUI(); activePlanId = null; planCache = null; renderPlanPanel(); if(typeof renderResultsPanel === 'function') renderResultsPanel();
   if(stage.image) loadImage(stage.image, true, true);

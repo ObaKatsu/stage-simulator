@@ -6,7 +6,7 @@
  *  亦不保證適售性或特定目的適用性。完整條款見 LICENSE 或 <https://www.gnu.org/licenses/>。
  */
 // Stage 模擬器 service worker: network first (always the newest files when online), cache fallback (works offline).
-const CACHE = 'stage-sim-v10';
+const CACHE = 'stage-sim-v14';
 const APP = ['./', 'index.html', 'style.css', 'manifest.webmanifest',
   'js/01-core.js', 'js/02-visibility-3d.js', 'js/02b-gl3d.js', 'js/03-model-plan.js', 'js/03b-montecarlo.js', 'js/04-replay.js', 'js/05-review.js', 'js/06-video.js', 'js/07-ui-init.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];

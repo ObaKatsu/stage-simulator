@@ -89,6 +89,8 @@ function startReplay(opts){
   R.shots.forEach((x, i) => { const o = getObj(x.target); if(!o || !x.steel) return; if(outcomes[i] === 'hit' && fallT[o.id] == null) fallT[o.id] = shotImpact(x); });
   Object.assign(RP, {on:true, playing:false, t:0, total:R.total + 1.5, res:R, plan, stops, outcomes, fallT, pre:null, cmp:null, rl:reloadWindows(R, stops),
     seed:opts && opts.seed || 12345, srcPlanId:activePlan() ? activePlan().id : null, layout:replayLayoutKey()});
+  RP.tknock = [];
+  if(RP.random && R.tunnelRisk){ const rnd = mulberry32(RP.seed + 7); R.tunnelRisk.forEach(r => { const S = RP.stops[r.stop]; r.idx.forEach(i => { if(rnd() < r.p) RP.tknock.push({id:r.tunnel, idx:i, t:S ? (S.dep + S.arr) / 2 : 0}); }); }); }
   if(RP.cmpId){ const cp = plans().find(p => p.id === RP.cmpId && p.id !== plan.id); if(cp){ RP.cmp = buildRun(cp); RP.total = Math.max(RP.total, RP.cmp.res.total + 1.5); } }
   RP.act = replayActivations();
   if(leftTab !== '3d') setLeftTab('3d');
@@ -141,10 +143,31 @@ function figPos(t){
   return S[S.length - 1].to;
 }
 function stopAt(t){ const S = RP.stops; for(let k = S.length - 1; k >= 0; k--) if(t >= S[k].arr) return (k === S.length - 1 || t < S[k+1].dep) ? k : -1; return -1; }
+// is the figure sitting at time t? returns the seat ({h, straddle}) or null
+function figSeat(t){
+  const k = stopAt(t), p = figPos(t), c = stage.startCond || {};
+  if(k >= 0 && RP.stops[k].stance === 'sit') return seatAt(p[0], p[1]) || {h:0.45, straddle:false};
+  const first = RP.stops[0];
+  if(c.pose && c.pose !== 'stand' && first && t < first.dep + (c.after === 'stay' ? 0 : startRise() * 0.6) && (k < 0 || k === 0)){
+    const so = getObj(c.seatObj); return so ? {obj:so, h:so.seat || (so.type === 'barrel' ? (so.h || 0.9) : 0.45), straddle:c.pose === 'straddle'} : {h:0.45, straddle:c.pose === 'straddle'};
+  }
+  return null;
+}
+function figBase(t){ const p = figPos(t); return surfaceAt(p[0], p[1]); }
 function figEye(t){
+  const se = figSeat(t); if(se) return se.h + sitEye();
+  const e = figEye0(t) + figBase(t), p = figPos(t), tn = inTunnel(p[0], p[1]);
+  return tn ? Math.min(e, (tn.h || TUNNEL_DEF.h) - 0.2) : e;   // bent low under the slats of a Cooper tunnel
+}
+function figEye0(t){
   const k = stopAt(t), stand = postureEye('stand'); if(k < 0) return stand;
   const s = RP.stops[k]; if(s.stance === 'stand') return stand;
   const u = Math.min(1, (t - s.arr) / Math.max(0.2, s.postT)); return stand + (postureEye(s.stance) - stand) * u;
+}
+// slats knocked off a Cooper tunnel in this replay (only when outcomes are drawn at random)
+function tunnelFallen(o){
+  if(!RP.on || !RP.tknock) return null;
+  const s = new Set(); RP.tknock.forEach(k => { if(k.id === o.id && RP.t >= k.t) s.add(k.idx); }); return s;
 }
 function replayActivations(){
   // when does each activator fire? steel: when it falls; triggers: when the figure first passes within 0.6 m
@@ -298,7 +321,7 @@ function planPath3d(floor, labels){
   });
 }
 function replayFigure(faces, labels, colOverride, tag){
-  const t = RP.t, p = figPos(t), eye = figEye(t), stand = postureEye('stand');
+  const t = RP.t, p = figPos(t), seat = figSeat(t), base = seat ? 0 : figBase(t), eye = figEye(t) - base, stand = postureEye('stand');
   const shots = RP.res.shots; let aim = null, aimObj = null;
   const nxt = shots.find(x => x.t >= t - 0.12);
   const k = stopAt(t);
@@ -309,11 +332,12 @@ function replayFigure(faces, labels, colOverride, tag){
   if(aA != null) dir = [Math.cos(aA), Math.sin(aA)];
   else if(aim) dir = [aim[0] - p[0], aim[1] - p[1]];
   else dir = mv ? [mv.to[0] - mv.from[0], mv.to[1] - mv.from[1]] : downDir();
+  { const se0 = figSeat(t); if(se0 && se0.obj && se0.obj.rot != null && (!aim || se0.straddle) && !(aA != null && !se0.straddle)) dir = facing(se0.obj.rot); }   // sit the way the chair, boat or horse faces
   const L = Math.hypot(dir[0], dir[1]) || 1; dir = [dir[0]/L, dir[1]/L];
   const side = [dir[1], -dir[0]];                                   // shooter's right
   const hs = PROFILE.body && PROFILE.body.hand === 'left' ? -1 : 1;  // gun-hand side
   const col = colOverride || '#1F4E8C', skin = '#E6BE98', dark = '#20262E';
-  const P = (fw, sd, z) => [p[0] + dir[0]*fw + side[0]*sd, p[1] + dir[1]*fw + side[1]*sd, z];
+  const P = (fw, sd, z) => [p[0] + dir[0]*fw + side[0]*sd, p[1] + dir[1]*fw + side[1]*sd, z + base];
   const add = (a, b, w) => [a[0] + b[0]*w, a[1] + b[1]*w, a[2] + b[2]*w];
   const mix = (a, b, u) => [a[0] + (b[0] - a[0])*u, a[1] + (b[1] - a[1])*u, a[2] + (b[2] - a[2])*u];
   const limb = (a, b, w, c) => faces.push({line:[a, b], stroke:c || col, wlw:w, bias:-0.3});
@@ -338,15 +362,17 @@ function replayFigure(faces, labels, colOverride, tag){
     const hand = P(0.55, 0, 0.24); arm(P(0, 0.2, 0.18), hand, 1); arm(P(0, -0.2, 0.18), hand, -1);
     const gd = gunDir(hand, aimObj ? null : 0); muzzle = add(hand, gd, 0.2); limb(hand, muzzle, 0.045, dark);
   }else{
-    const drop = Math.max(0, stand - eye), kneel = eye <= postureEye('kneel') + 0.05;
-    const hipZ = kneel ? 0.62 : Math.max(0.5, 0.53*stand - drop*0.95);
+    const drop = Math.max(0, stand - eye), kneel = !seat && eye <= postureEye('kneel') + 0.05;
+    const hipZ = seat ? seat.h + 0.08 : kneel ? 0.62 : Math.max(0.5, 0.53*stand - drop*0.95);
     const lean = mv ? 0.14 : 0.06, shZ = eye - 0.2;
     const hip = P(-0.03, 0, hipZ), shC = P(lean, 0, shZ);
     // legs
     const leg = (hp, knee, foot) => { limb(hp, knee, 0.13); limb(knee, foot, 0.1); limb(foot, add(foot, [dir[0], dir[1], 0], 0.17), 0.08, dark); };
     const hpR = P(-0.03, 0.1, hipZ), hpL = P(-0.03, -0.1, hipZ);
-    if(kneel){ leg(hpR, P(-0.05, 0.12*hs, 0.06), P(-0.45, 0.12*hs, 0.05)); leg(hpL, P(0.38, -0.12*hs, 0.5), P(0.4, -0.12*hs, 0.01)); }
-    else if(mv){
+    if(seat && seat.straddle){ const fz = Math.max(0.02, seat.h - 0.75); leg(hpR, P(0.12, 0.32, seat.h - 0.2), P(0.1, 0.36, fz)); leg(hpL, P(0.12, -0.32, seat.h - 0.2), P(0.1, -0.36, fz)); }
+    else if(seat){ leg(hpR, P(0.42, 0.13, seat.h + 0.04), P(0.48, 0.14, 0.02)); leg(hpL, P(0.42, -0.13, seat.h + 0.04), P(0.48, -0.14, 0.02)); }
+    else if(kneel){ leg(hpR, P(-0.05, 0.12*hs, 0.06), P(-0.45, 0.12*hs, 0.05)); leg(hpL, P(0.38, -0.12*hs, 0.5), P(0.4, -0.12*hs, 0.01)); }
+    else if(mv && !seat){
       const d = Math.hypot(p[0] - mv.from[0], p[1] - mv.from[1]), a = Math.sin(d / 0.6 * Math.PI);
       const fR = P(0.34*a, 0.11, 0.02 + Math.max(0, -a)*0.14), fL = P(-0.34*a, -0.11, 0.02 + Math.max(0, a)*0.14);
       leg(hpR, add(mix(hpR, fR, 0.5), [dir[0], dir[1], 0], 0.12), fR); leg(hpL, add(mix(hpL, fL, 0.5), [dir[0], dir[1], 0], 0.12), fL);
@@ -366,8 +392,9 @@ function replayFigure(faces, labels, colOverride, tag){
     let gH, sH, gd, magAt = null, gunShown = true;
     if(drawing){
       const u0 = sc.hands === 'wrists' ? 0.12 : 0.08, u = Math.max(0, Math.min(1, (t - u0) / Math.max(0.2, drawEnd - u0)));
-      const rest = sc.hands === 'wrists' ? P(lean - 0.05, 0.3*hs, eye + 0.12) : P(0, 0.26*hs, hipZ - 0.05);
-      const restS = sc.hands === 'wrists' ? P(lean - 0.05, -0.3*hs, eye + 0.12) : P(0, -0.26*hs, hipZ - 0.05);
+      const lap = sc.hands === 'lap' && seat;
+      const rest = sc.hands === 'wrists' ? P(lean - 0.05, 0.3*hs, eye + 0.12) : lap ? P(0.3, 0.12*hs, hipZ + 0.05) : P(0, 0.26*hs, hipZ - 0.05);
+      const restS = sc.hands === 'wrists' ? P(lean - 0.05, -0.3*hs, eye + 0.12) : lap ? P(0.3, -0.12*hs, hipZ + 0.05) : P(0, -0.26*hs, hipZ - 0.05);
       const pick = sc.gunLoc && sc.gunLoc !== 'holster';
       gH = u < 0.35 ? mix(rest, pick ? P(0.35, 0.1*hs, 0.8) : holster, u / 0.35) : mix(pick ? P(0.35, 0.1*hs, 0.8) : holster, aimH, (u - 0.35) / 0.65);
       sH = u < 0.5 ? mix(restS, P(lean + 0.2, 0, eye - 0.35), u / 0.5) : mix(P(lean + 0.2, 0, eye - 0.35), aimH, (u - 0.5) / 0.5);
@@ -395,7 +422,7 @@ function replayFigure(faces, labels, colOverride, tag){
     const P = d => [muzzle[0] + (e[0] - muzzle[0]) * d / D, muzzle[1] + (e[1] - muzzle[1]) * d / D, muzzle[2] + (e[2] - muzzle[2]) * d / D];
     if(d1 < D){ faces.push({line:[P(d0), P(d1)], stroke:'rgba(245,179,36,.75)', lw:2, bias:-0.35}); faces.push({dot:P(d1), fill:'#FFF3B0', wr:0.012, bias:-0.36}); }
   });
-  labels.push({p:[p[0], p[1], eye + 0.35], t:(tag || ('射手' + (RP.cmp ? '（計畫 ' + RP.plan.name + '）' : ''))) + (rlw ? '・換匣' : ''), c:col, pri:0});
+  labels.push({p:[p[0], p[1], base + eye + 0.35], t:(tag || ('射手' + (RP.cmp ? '（計畫 ' + RP.plan.name + '）' : ''))) + (rlw ? '・換匣' : ''), c:col, pri:0});
 }
 function replayMarks(faces){
   const t = RP.t, shots = RP.res.shots;

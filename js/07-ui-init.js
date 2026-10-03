@@ -319,6 +319,7 @@ renderPostureBox();
 renderVisPanel();
 ensureProfileParams();
 renderParamBox();
+renderStartCond();   // again, now that the shooter's draw / pick-up times are loaded
 renderPlanPanel();
 renderResultsPanel();
 syncDesignUI();

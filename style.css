@@ -253,3 +253,19 @@ aside > details:not(.showhelp) .sec > p.help, aside > details:not(.showhelp) .ex
   .respanel.closed .rtabs{display:flex!important}
   .respanel.closed .res-body{display:block}
 }
+
+/* drag to reorder targets in a stop */
+.tlist li{position:relative}
+.draghandle{cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;color:var(--muted);font-size:16px;line-height:1;padding:6px 4px;margin-left:-4px;border-radius:4px}
+.draghandle:hover{background:var(--paper);color:var(--ink)}
+.tlist .ord,.dragghost .ord{display:inline-block;min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:9px;background:#1F6E8C;color:#fff;font-size:11px;margin-right:4px}
+body.pdrag, body.pdrag *{cursor:grabbing!important;user-select:none;-webkit-user-select:none}
+.dragghost{position:fixed;z-index:300;pointer-events:none;background:#fff;box-shadow:0 8px 24px rgba(30,43,56,.25);border-radius:6px;opacity:.92;list-style:none;padding:4px 6px;display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.tlist li.dragsrc{opacity:.35}
+.tlist li.dropbefore::before,.tlist li.dropafter::after{content:'';position:absolute;left:0;right:0;height:3px;background:var(--tape);border-radius:2px}
+.tlist li.dropbefore::before{top:-2px}
+.tlist li.dropafter::after{bottom:-2px}
+body.pdrag .tlist{min-height:30px}
+.tlist.dropin{outline:2px dashed var(--tape);outline-offset:2px;border-radius:4px}
+
+canvas.swingplot{width:100%;display:block;margin:6px 0;background:#fff;border:1px solid var(--line);border-radius:6px}

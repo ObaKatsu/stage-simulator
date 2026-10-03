@@ -19,6 +19,16 @@ function defaultProfile(){
     kneel:{eye:1.05, t:1.0, est:true}, prone:{eye:0.30, t:2.5, est:true}}};
 }
 let PROFILE = defaultProfile();
+/* BB flight: 6 mm sphere, quadratic air drag, hop-up assumed set for a flat path over 3-10 m.
+   v(x) = v0·e^(−kx), t(x) = (e^(kx) − 1)/(k·v0), k = ½ρCdA/m */
+const BB_AIR = {rho:1.2, cd:0.47, d:0.006};
+const BB_DEF = {mass:0.28, v0:90};
+function bbPar(){ return Object.assign({}, BB_DEF, PROFILE.bb || {}); }
+function bbK(){ const b = bbPar(); return 0.5 * BB_AIR.rho * BB_AIR.cd * Math.PI * (BB_AIR.d / 2) ** 2 / (b.mass / 1000); }
+function bbFlight(dist){ if(!(dist > 0)) return 0; const b = bbPar(), k = bbK(); return (Math.exp(k * dist) - 1) / (k * b.v0); }
+function bbSpeedAt(dist){ return bbPar().v0 * Math.exp(-bbK() * Math.max(0, dist)); }
+function bbDistAt(tau){ const b = bbPar(), k = bbK(); return tau > 0 ? Math.log(1 + k * b.v0 * tau) / k : 0; }   // distance covered after tau seconds
+function bbEnergy(){ const b = bbPar(); return 0.5 * b.mass / 1000 * b.v0 * b.v0; }
 const LS_SHOOTERS = 'stageSim.shooters';
 let SHOOTERS = null;   // {activeId, list:[{id, name, profile}]}
 function defaultBody(){
@@ -147,11 +157,23 @@ function renderPostureBox(){
       numField(k === 'stand' ? '轉換時間（秒）' : '由站姿轉換（秒）' + (p.est ? '・估計' : ''), p.t, 1, v => { if(v != null && v >= 0){ p.t = v; p.est = false; saveProfile(); objectsChanged(false); } }, '0.1')));
   });
   box.appendChild(numField('左右探身距離（公分）', PROFILE.lean, 100, v => { if(v != null && v >= 0){ PROFILE.lean = v; saveProfile(); objectsChanged(false); } }, '1'));
+  const b = bbPar(), setB = (k, v) => { PROFILE.bb = Object.assign({}, bbPar(), {[k]:v}); saveProfile(); objectsChanged(false); renderPostureBox(); };
+  box.appendChild(el('div', {class:'kind', text:'BB 彈'}));
+  box.appendChild(row(numField('彈重（公克）', b.mass, 1, v => { if(v > 0.05 && v < 1) setB('mass', v); }, '0.01'),
+                      numField('初速（公尺／秒）', b.v0, 1, v => { if(v > 20 && v < 200) setB('v0', v); }, '1')));
+  box.appendChild(el('div', {class:'readout', text:'槍口動能 ' + fmt(bbEnergy(), 2) + ' 焦耳。飛行時間：' + [3, 5, 7, 10].map(d => d + ' 公尺 ' + fmt(bbFlight(d), 3) + ' 秒').join('、') + '；10 公尺處剩 ' + fmt(bbSpeedAt(10), 0) + ' 公尺／秒。'}));
+  box.appendChild(el('p', {class:'help', text:'以 6 毫米球體、空氣阻力係數 0.47 計算，hop-up 視為已調平（3 到 10 公尺內彈道近似水平）。用於：stop plate 命中才停錶的時間、鋼靶倒下與機關啟動的時間、移動靶的提前量，以及 3D 回放的 BB 飛行。初速請以測速器實測。'}));
   box.appendChild(el('p', {class:'help', text:'轉換時間為由站姿換到該姿態所需的時間，標示「估計」者為暫定值，請依實測修改；階段 3 的時間模型會使用這些數值。'}));
 }
 function standTopOf(o){
   if(o.type === 'noshoot'){ const t = o.cover ? getObj(o.cover) : null; if(t && t.standTop != null) return t.standTop; }
   return o.standTop != null ? o.standTop : null;
+}
+// rotate point P about the axis through piv along unit vector k by angle a (Rodrigues)
+function rotAxis(P, piv, k, a){
+  const v = [P[0] - piv[0], P[1] - piv[1], P[2] - piv[2]], c = Math.cos(a), s = Math.sin(a), d = k[0]*v[0] + k[1]*v[1] + k[2]*v[2];
+  const x = [k[1]*v[2] - k[2]*v[1], k[2]*v[0] - k[0]*v[2], k[0]*v[1] - k[1]*v[0]];
+  return [piv[0] + v[0]*c + x[0]*s + k[0]*d*(1 - c), piv[1] + v[1]*c + x[1]*s + k[1]*d*(1 - c), piv[2] + v[2]*c + x[2]*s + k[2]*d*(1 - c)];
 }
 function paperGeom(o){
   const spec = targetSpec(o.size), sx = spec.w / 0.30, sy = spec.h / 0.375;
@@ -159,7 +181,9 @@ function paperGeom(o){
   const top = (st == null ? 1.0 : st) + spec.shoulder;
   const f = facing(o.rot), p = [-f[1], f[0]];
   const W = 30 * sx;
-  const toW = (u, v) => { const lat = (u - W/2) / 100; return [o.x + p[0]*lat, o.y + p[1]*lat, top - v/100]; };
+  const toW0 = (u, v) => { const lat = (u - W/2) / 100; return [o.x + p[0]*lat, o.y + p[1]*lat, top - v/100]; };
+  const S = o.swing;   // replay pose of a swinger: rotation about the pivot axle
+  const toW = S ? (u, v) => rotAxis(toW0(u, v), S.piv, S.k, S.a) : toW0;
   const oct = OCT.map(([u, v]) => [u*sx, v*sy]), az = AZONE.map(([u, v]) => [u*sx, v*sy]);
   return {f, p, top, bottom:top - spec.h, est, W, H:37.5*sy, oct, az, toW};
 }
@@ -565,6 +589,28 @@ function clipNear(pts){
   return out;
 }
 function scr(cam, p){ return [v3d.w/2 + cam.f*p[0]/p[2], v3d.h/2 - cam.f*p[1]/p[2]]; }
+/* swinger frame: post up to the axle, arm from the counterweight through the pivot to the target */
+function swingFrame3d(faces, o, g, solid){
+  const host = o, ax = swingAxle(Object.assign({}, host, {swing:null})), P = swingPar(host.mech);
+  const a = o.swing ? o.swing.a : 0, R = q => rotAxis(q, ax.piv, ax.k, a);
+  const bk = [-g.f[0]*0.04, -g.f[1]*0.04], pv = [ax.piv[0] + bk[0], ax.piv[1] + bk[1], ax.piv[2]];
+  const pt = R([ax.piv[0] + bk[0]*0.6, ax.piv[1] + bk[1]*0.6, ax.zc - 0.05]), pc = R([ax.piv[0] + bk[0]*0.6, ax.piv[1] + bk[1]*0.6, ax.piv[2] - P.rC]);
+  const post = [pv[0] + bk[0], pv[1] + bk[1]];
+  if(solid){
+    postFaces(faces, post[0], post[1], 0.02, 0, pv[2] + 0.04, '#5E6A75', '#2F3840');
+    boxFaces(faces, segCorners([post[0] - g.p[0]*0.18, post[1] - g.p[1]*0.18], [post[0] + g.p[0]*0.18, post[1] + g.p[1]*0.18], 0.3), 0, 0.03, '#5E6A75', '#2F3840', 0.8);
+  }else faces.push({line:[[post[0], post[1], 0], [post[0], post[1], pv[2]]], stroke:'#5E6A75', lw:3});
+  faces.push({line:[pc, pt], stroke:'#3A3F44', wlw:0.025});
+  faces.push({dot:pv, fill:'#C8372D', wr:0.022});
+  // counterweight block, turned with the arm
+  const cw = 0.07, chh = 0.05, e1 = R([pc[0], pc[1], pc[2]]), u = [g.p[0], g.p[1], 0];
+  const cor = [[-cw, -chh], [cw, -chh], [cw, chh], [-cw, chh]].map(([s, h]) => { const q = [ax.piv[0] + bk[0]*0.6 + u[0]*s, ax.piv[1] + bk[1]*0.6 + u[1]*s, ax.piv[2] - P.rC + h]; return R(q); });
+  faces.push({pts:cor, fill:'#2F3840', stroke:'#111', lw:1});
+  if(!RP.on){   // show the locked position as an outline so the swing is visible while planning
+    const lk = swingAngle(host.mech, null), gl = paperGeom(Object.assign({}, host, {swing:{piv:ax.piv, k:ax.k, a:-lk}}));
+    faces.push({pts:gl.oct.map(([u2, v2]) => gl.toW(u2, v2)), fill:null, stroke:'rgba(107,63,160,.75)', lw:1.5});
+  }
+}
 /* solid shapes for the 3D view (planar polygons, usable by both renderers) */
 function boxFaces(faces, c4, z0, z1, fill, edge, lw, extra){
   const q = (a, b) => [[a[0],a[1],z0],[b[0],b[1],z0],[b[0],b[1],z1],[a[0],a[1],z1]];
@@ -641,12 +687,13 @@ function build3d(statusMap, cam){
     }else if(o.type === 'paper' || o.type === 'noshoot'){
       const g = paperGeom(o), off = o.type === 'noshoot' ? 0.012 : 0;
       const dz = o.type === 'noshoot' ? (o.dz || 0) : 0;
-      const pts = g.oct.map(([u, v]) => { const w = g.toW(u, v); return [w[0] + g.f[0]*off, w[1] + g.f[1]*off, w[2] + dz]; });
+      const pts = g.oct.map(([u, v]) => { const w = g.toW(u, v - dz*100); return [w[0] + g.f[0]*off, w[1] + g.f[1]*off, w[2]]; });
       faces.push({pts, fill:o.type === 'paper' ? '#D2A86E' : '#FAFAFA', stroke:hl || (o.type === 'paper' ? '#7A5424' : '#333'), lw:hl ? 3 : 1.2, bias:o.type === 'noshoot' ? -0.02 : 0});
       if(o.type === 'paper'){
         faces.push({pts:g.az.map(([u, v]) => g.toW(u, v)).map(w => [w[0] + g.f[0]*0.001, w[1] + g.f[1]*0.001, w[2]]), fill:null, stroke:'rgba(122,84,36,.8)', lw:1, bias:-0.01});
         const l = g.toW(0, g.H/2), r2 = g.toW(g.W, g.H/2);
-        if(solid){
+        if(isSwingPhys(o)) swingFrame3d(faces, o, g, solid);
+        else if(solid){
           const bk = [-g.f[0]*0.015, -g.f[1]*0.015];
           const sTop = Math.max(0.15, g.top - targetSpec(o.size).shoulder);   // stand frame top = target shoulders
           postFaces(faces, l[0] + bk[0], l[1] + bk[1], 0.012, 0, sTop, '#9C7746', '#6E5230');

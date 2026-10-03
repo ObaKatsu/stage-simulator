@@ -7,7 +7,17 @@
  *  亦不保證適售性或特定目的適用性。完整條款見 LICENSE 或 <https://www.gnu.org/licenses/>。
  */
 /* ---------- phase 3b: replay & sound ---------- */
-const BB_SPEED = 90;   // m/s, approximate Action Air BB velocity (estimate) used for the steel "ding" delay
+// trigger and arrival times of a planned shot (the stop plate's timeline time is its arrival)
+function shotFire(x){ return x.fire != null ? x.fire : x.t; }
+function shotImpact(x){ return shotFire(x) + (x.flight != null ? x.flight : 0); }
+// where the BB of this shot ends: the target centre at the moment it arrives (a swinger has moved by then)
+function bbEndPoint(o, when){
+  if(isSwingPhys(o) && RP.on){
+    const ax = swingAxle(o), A = mechActTime(o), th = swingAngle(o.mech, A == null ? null : when - A);
+    return rotAxis([o.x, o.y, ax.zc], ax.piv, ax.k, -th);
+  }
+  return [o.x, o.y, tgtCenterZ(o)];
+}
 const RP = {on:false, playing:false, t:0, speed:1, total:0, sound:true, random:false, res:null, plan:null, stops:[], outcomes:[], fallT:{}, act:{}, lastWall:0, pre:null, raf:0};
 let AC = null;
 function audio(){ if(!AC){ try{ AC = new (window.AudioContext || window.webkitAudioContext)(); }catch(e){ AC = null; } } if(AC && AC.state === 'suspended') AC.resume(); return AC; }
@@ -76,7 +86,7 @@ function startReplay(opts){
     const h = x.hd; return u < h.A ? 'A' : u < h.A + h.C ? 'C' : u < h.A + h.C + h.D ? 'D' : u < h.A + h.C + h.D + h.M ? 'M' : 'NS';
   });
   const fallT = {};
-  R.shots.forEach((x, i) => { const o = getObj(x.target); if(!o || !x.steel) return; if(outcomes[i] === 'hit' && fallT[o.id] == null) fallT[o.id] = x.t + Math.hypot(o.x - plan.stops[x.stop].x, o.y - plan.stops[x.stop].y) / BB_SPEED; });
+  R.shots.forEach((x, i) => { const o = getObj(x.target); if(!o || !x.steel) return; if(outcomes[i] === 'hit' && fallT[o.id] == null) fallT[o.id] = shotImpact(x); });
   Object.assign(RP, {on:true, playing:false, t:0, total:R.total + 1.5, res:R, plan, stops, outcomes, fallT, pre:null, cmp:null, rl:reloadWindows(R, stops),
     seed:opts && opts.seed || 12345, srcPlanId:activePlan() ? activePlan().id : null, layout:replayLayoutKey()});
   if(RP.cmpId){ const cp = plans().find(p => p.id === RP.cmpId && p.id !== plan.id); if(cp){ RP.cmp = buildRun(cp); RP.total = Math.max(RP.total, RP.cmp.res.total + 1.5); } }
@@ -142,11 +152,96 @@ function replayActivations(){
   stage.objects.forEach(o => {
     if(RP.fallT[o.id] != null) act[o.id] = RP.fallT[o.id];
     if(o.type === 'trigger'){ for(let t = 0; t <= RP.total; t += 0.05){ const p = figPos(t); if(Math.hypot(p[0] - o.x, p[1] - o.y) < 0.6){ act[o.id] = t; break; } } }
-    if(o.type === 'paper'){ const sh = RP.res.shots.find(x => x.target === o.id); if(sh) act[o.id] = sh.t; }
+    if(o.type === 'paper'){ const sh = RP.res.shots.find(x => x.target === o.id); if(sh) act[o.id] = shotImpact(sh); }
   });
   return act;
 }
 function mechActTime(o){ const m = o.mech; if(!m || m.act.mode === 'none') return null; if(m.act.mode === 'start') return 0; const a = RP.act[m.act.id]; return a == null ? null : a + (m.act.delay || 0); }
+/* ---------- swinger: compound pendulum ----------
+   A rigid arm turns on a low-friction bearing (pivot). The heavy counterweight sits below the pivot,
+   the light target above it, so at rest the target stands upright (theta = 0).
+   Locked: the counterweight is lifted to one side (theta0), stored potential energy, angular speed 0.
+   Released (activator down + delay): I*alpha = -M*g*d*sin(theta) - c*omega - q*omega*|omega| - friction. */
+const SWING_DEF = {rT:0.45, rC:0.20, mT:0.30, mC:2.0, mA:0.40, keep:70, side:'right', fric:0.3};
+const G0 = 9.81;
+function isSwingPhys(o){ return !!(o && o.type === 'paper' && o.mech && o.mech.type === 'swinger'); }
+function swingPar(m){ return Object.assign({}, SWING_DEF, m.phys || {}); }
+function swingBody(m){
+  const P = swingPar(m), M = P.mT + P.mC + P.mA, L = P.rT + P.rC;
+  const d = (P.mC * P.rC - P.mT * P.rT + P.mA * (P.rC - P.rT) / 2) / M;          // center of mass below the pivot (+)
+  const I = P.mC * P.rC * P.rC + P.mT * P.rT * P.rT + (P.mA / L) * (P.rC ** 3 + P.rT ** 3) / 3;
+  const K = M * G0 * d;                                                            // gravity torque scale, N·m
+  const wn = K > 0 ? Math.sqrt(K / I) : 0;
+  const del = Math.log(100 / Math.min(99.9, Math.max(1, P.keep)));                // log decrement per full swing
+  const zeta = del / Math.sqrt(4 * Math.PI * Math.PI + del * del);
+  let c = 2 * zeta * I * wn;                                                       // bearing (viscous) damping, first guess
+  const q = 0.5 * 1.2 * 1.2 * (0.02 * 0.45) * P.rT ** 3;                           // air drag on the target's leading edge
+  const tf = 0.01 * P.fric * Math.max(0, K);                                       // bearing breakaway friction
+  const body = {P, M, d, I, K, wn, zeta, c, q, tf, period:wn ? 2 * Math.PI / wn : null};
+  if(K > 0) body.c = swingCalib(body, rad(Math.min(170, Math.max(5, m.amp == null ? 90 : m.amp))), P.keep / 100);
+  return body;
+}
+// choose the bearing damping so that one full swing from the lock angle keeps the stated share of amplitude
+// (air drag and breakaway friction included), instead of trusting the small-angle formula
+function swingCalib(B, a0, keep){
+  const ratio = c => {
+    const dt = 1/400; let x = a0, w = 0, peaks = 0, t = 0;
+    const acc = (x, w) => (-B.K * Math.sin(x) - c * w - B.q * w * Math.abs(w) - B.tf * Math.tanh(w / 0.02)) / B.I;
+    while(t < 20){
+      const k1w = acc(x, w), k2w = acc(x + w*dt/2, w + k1w*dt/2), k3w = acc(x + (w + k1w*dt/2)*dt/2, w + k2w*dt/2), k4w = acc(x + (w + k2w*dt/2)*dt, w + k3w*dt);
+      const nx = x + dt/6*(w + 2*(w + k1w*dt/2) + 2*(w + k2w*dt/2) + (w + k3w*dt)), nw = w + dt/6*(k1w + 2*k2w + 2*k3w + k4w);
+      if(Math.sign(nw) !== Math.sign(w) && w !== 0){ peaks++; if(peaks === 2) return Math.abs(nx) / a0; }
+      x = nx; w = nw; t += dt;
+      if(Math.abs(w) < 2e-3 && B.K * Math.abs(Math.sin(x)) <= B.tf && t > 0.1) return 0;
+    }
+    return 1;
+  };
+  let lo = 0, hi = 4 * B.I * B.wn;
+  if(ratio(0) <= keep) return 0;                  // friction and air alone already lose more than asked
+  for(let i = 0; i < 24; i++){ const mid = (lo + hi) / 2; if(ratio(mid) > keep) lo = mid; else hi = mid; }
+  return (lo + hi) / 2;
+}
+const SWING_CACHE = new Map();
+function swingSim(m){
+  const key = JSON.stringify([swingPar(m), m.amp]);
+  let S = SWING_CACHE.get(key); if(S) return S;
+  const B = swingBody(m), dt = 1/400, T = 40;
+  const th0 = rad(Math.min(170, Math.max(1, m.amp == null ? 90 : m.amp))) * (B.P.side === 'left' ? -1 : 1);
+  const n = Math.round(T / dt), th = new Float32Array(n + 1);
+  let x = th0, w = 0, stopped = -1, tCenter = null, tTurn = null, turnAng = null, wMax = 0, tSettle = null, lastPeak = Math.abs(th0), crossings = [];
+  const acc = (x, w) => (-B.K * Math.sin(x) - B.c * w - B.q * w * Math.abs(w) - B.tf * Math.tanh(w / 0.02)) / B.I;
+  th[0] = x;
+  for(let i = 1; i <= n; i++){
+    if(stopped < 0){
+      const k1x = w, k1w = acc(x, w), k2x = w + k1w*dt/2, k2w = acc(x + k1x*dt/2, w + k1w*dt/2);
+      const k3x = w + k2w*dt/2, k3w = acc(x + k2x*dt/2, w + k2w*dt/2), k4x = w + k3w*dt, k4w = acc(x + k3x*dt, w + k3w*dt);
+      const nx = x + dt/6*(k1x + 2*k2x + 2*k3x + k4x), nw = w + dt/6*(k1w + 2*k2w + 2*k3w + k4w);
+      const t = i * dt;
+      if(Math.sign(nx) !== Math.sign(x) && x !== 0){ crossings.push(t); if(tCenter == null) tCenter = t; }
+      if(Math.sign(nw) !== Math.sign(w) && w !== 0){ if(tTurn == null){ tTurn = t; turnAng = Math.abs(nx); } lastPeak = Math.abs(nx); if(tSettle == null && lastPeak < rad(3)) tSettle = t; }
+      x = nx; w = nw; wMax = Math.max(wMax, Math.abs(w));
+      if(Math.abs(w) < 2e-3 && B.K * Math.abs(Math.sin(x)) <= B.tf){ stopped = i; w = 0; if(tSettle == null) tSettle = t; }
+    }
+    th[i] = x;
+  }
+  const per = crossings.length >= 3 ? crossings[2] - crossings[0] : B.period;
+  S = {dt, th, th0, B, tCenter, tTurn, turnAng, wMax, vMax:wMax * B.P.rT, period:per, tSettle, restAng:x};
+  if(SWING_CACHE.size > 50) SWING_CACHE.clear(); SWING_CACHE.set(key, S);
+  return S;
+}
+function swingAngle(m, tRel){   // tRel = seconds since release; locked before that
+  const S = swingSim(m);
+  if(tRel == null || tRel <= 0) return S.th0;
+  const f = tRel / S.dt, i = Math.floor(f);
+  if(i >= S.th.length - 1) return S.th[S.th.length - 1];
+  return S.th[i] + (S.th[i+1] - S.th[i]) * (f - i);
+}
+// pivot and axle of a swinger in world space, from its upright rest pose
+function swingAxle(host){
+  const g = paperGeom(Object.assign({}, host, {swing:null})), P = swingPar(host.mech);
+  const zc = (g.top + g.bottom) / 2;
+  return {piv:[host.x, host.y, Math.max(0.05, zc - P.rT)], k:[g.f[0], g.f[1], 0], zc, low:zc - P.rT < 0.05};
+}
 // pose of an object at replay time: moved copy, fallen flag, or null when hidden
 function replayPose(o){
   if(!RP.on) return o;
@@ -158,8 +253,11 @@ function replayPose(o){
   const vis = A == null ? m.preVisible : (t < A ? m.preVisible : (t >= A + (m.winFrom || 0) && (m.winTo == null || t <= A + m.winTo)) || (m.preVisible && t < A + (m.winFrom || 0) && m.type === 'swinger'));
   if(!vis && m.type !== 'swinger' && m.type !== 'slider') return null;
   let dx = 0, dy = 0;
+  if(m.type === 'swinger' && host.type === 'paper'){
+    const ax = swingAxle(host), th = swingAngle(m, A == null ? null : t - A);
+    return Object.assign({}, o, {swing:{piv:ax.piv, k:ax.k, a:-th}});   // + theta = toward the shooter's right
+  }
   if(A != null && t >= A){
-    if(m.type === 'swinger'){ const f = facing(host.rot), p = [-f[1], f[0]], per = m.period || 1.2, L = 0.6 * Math.sin(rad((m.amp || 90) / 2)) * Math.exp(-(t - A) / 8); const off = L * Math.sin(Math.PI * (t - A) / per); dx = p[0]*off; dy = p[1]*off; }
     if(m.type === 'slider' && m.ex != null){ const u = Math.min(1, (t - A) / (m.travel || 2)); dx = (m.ex - host.x)*u; dy = (m.ey - host.y)*u; }
   }
   return Object.assign({}, o, {x:o.x + dx, y:o.y + dy});
@@ -224,7 +322,7 @@ function replayFigure(faces, labels, colOverride, tag){
   const first = shots[0], sc = stage.startCond || {};
   const drawEnd = first ? Math.max(0.3, first.t - first.dt + (first.parts.move || 0) + Math.max(0.2, (first.parts.shoot || 0) - 0.08)) : 0;
   const drawing = first && t < drawEnd;
-  const shotNow = shots.some(x => t >= x.t && t - x.t < 0.05);
+  const shotNow = shots.some(x => t >= shotFire(x) && t - shotFire(x) < 0.05);
   // gun direction toward the target, including height
   const gunDir = (hand, pitchDeg) => {
     if(pitchDeg == null && aimObj){ const tz = tgtCenterZ(aimObj), hd = Math.hypot(aimObj.x - hand[0], aimObj.y - hand[1]) || 1, a = Math.atan2(tz - hand[2], hd); return [dir[0]*Math.cos(a), dir[1]*Math.cos(a), Math.sin(a)]; }
@@ -288,15 +386,23 @@ function replayFigure(faces, labels, colOverride, tag){
   }
   if(muzzle && shotNow) ball(muzzle, 0.07, '#F5B324');
   // tracer to the target just shot
-  if(muzzle) shots.forEach(x => { if(t >= x.t && t - x.t < 0.07){ const o = getObj(x.target); if(o) faces.push({line:[muzzle, [o.x, o.y, tgtCenterZ(o)]], stroke:'rgba(245,179,36,.9)', lw:2, bias:-0.35}); } });
+  // BB in flight: drag slows it down, so it covers less ground every frame; a short trail shows the path
+  if(muzzle) shots.forEach(x => {
+    const tf = shotFire(x), fl = x.flight || 0; if(t < tf || t > tf + fl + 0.03) return;
+    const o = getObj(x.target); if(!o) return;
+    const e = bbEndPoint(o, tf + fl), D = Math.hypot(e[0] - muzzle[0], e[1] - muzzle[1], e[2] - muzzle[2]) || 1;
+    const d1 = Math.min(D, bbDistAt(t - tf)), d0 = Math.max(0, d1 - 0.6);
+    const P = d => [muzzle[0] + (e[0] - muzzle[0]) * d / D, muzzle[1] + (e[1] - muzzle[1]) * d / D, muzzle[2] + (e[2] - muzzle[2]) * d / D];
+    if(d1 < D){ faces.push({line:[P(d0), P(d1)], stroke:'rgba(245,179,36,.75)', lw:2, bias:-0.35}); faces.push({dot:P(d1), fill:'#FFF3B0', wr:0.012, bias:-0.36}); }
+  });
   labels.push({p:[p[0], p[1], eye + 0.35], t:(tag || ('射手' + (RP.cmp ? '（計畫 ' + RP.plan.name + '）' : ''))) + (rlw ? '・換匣' : ''), c:col, pri:0});
 }
 function replayMarks(faces){
   const t = RP.t, shots = RP.res.shots;
-  shots.forEach(x => { if(t < x.t || t - x.t > 0.15 || x.steel) return; const o0 = getObj(x.target), o = o0 && replayPose(o0); if(!o) return;
+  shots.forEach(x => { const ti = shotImpact(x); if(t < ti || t - ti > 0.15 || x.steel) return; const o0 = getObj(x.target), o = o0 && replayPose(o0); if(!o) return;
     const g = paperGeom(o); faces.push({pts:g.oct.map(([u, v]) => { const w = g.toW(u, v); return [w[0] + g.f[0]*0.004, w[1] + g.f[1]*0.004, w[2]]; }), fill:null, stroke:'#FFD23F', lw:4, bias:-0.25}); });
   shots.forEach((x, i) => {
-    if(x.t > t || x.steel) return;
+    if(shotImpact(x) > t || x.steel) return;
     const oc = RP.outcomes[i]; if(oc === 'M') return;
     const o0 = getObj(x.target); if(!o0) return;
     const o = replayPose(o0); if(!o) return;
@@ -364,7 +470,7 @@ function replayTick(now){
 function replaySounds(t0, t1){
   if(t0 === 0 && t1 > 0 && !RP.beeped){ sndBeep(); RP.beeped = true; }
   RP.res.shots.forEach((x, i) => {
-    if(x.t > t0 && x.t <= t1){ sndShot(); if(!x.steel && RP.outcomes[i] !== 'M') setTimeout(sndPaper, 60); }
+    const tf = shotFire(x); if(tf > t0 && tf <= t1){ sndShot(); if(!x.steel && RP.outcomes[i] !== 'M') setTimeout(sndPaper, Math.max(20, (x.flight || 0.06) * 1000 / (RP.speed || 1))); }
     const f = RP.fallT[x.target];
     if(x.steel && f != null && f > t0 && f <= t1 && RP.res.shots.findIndex(y => y.target === x.target && RP.outcomes[y.i] === 'hit') === i) sndDing(getObj(x.target)?.type === 'stopplate');
   });

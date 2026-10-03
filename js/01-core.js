@@ -1723,6 +1723,45 @@ function renderProps(){
   p.appendChild(el('div', {class:'btns'}, el('button', {class:'danger', text:'刪除物件', onclick:deleteSel})));
   box.appendChild(p);
 }
+/* swinger as a compound pendulum: geometry, masses, lock angle, damping; shows the simulated swing */
+function renderSwingProps(d, o, m, upd){
+  const P = swingPar(m);
+  const setP = (k, v) => { m.phys = Object.assign({}, swingPar(m), {[k]:v}); upd(false); };
+  d.appendChild(el('div', {class:'kind', text:'搖擺靶（複擺）'}));
+  d.appendChild(row(numField('鎖定角度（度）', m.amp == null ? 90 : m.amp, 1, v => { m.amp = Math.min(170, Math.max(1, v || 90)); upd(false); }, '1'),
+    selField('鎖定時靶倒向', [['right','射手的右邊'],['left','射手的左邊']], P.side, v => setP('side', v))));
+  d.appendChild(row(numField('支點到靶中心（公分）', Math.round(P.rT*100), 1, v => setP('rT', Math.max(0.05, (v || 45) / 100)), '1'),
+    numField('支點到配重中心（公分）', Math.round(P.rC*100), 1, v => setP('rC', Math.max(0.02, (v || 20) / 100)), '1')));
+  d.appendChild(row(numField('靶端質量（公克）', Math.round(P.mT*1000), 1, v => setP('mT', Math.max(0.01, (v || 300) / 1000)), '10'),
+    numField('配重質量（公克）', Math.round(P.mC*1000), 1, v => setP('mC', Math.max(0.05, (v || 2000) / 1000)), '50')));
+  d.appendChild(row(numField('擺臂質量（公克）', Math.round(P.mA*1000), 1, v => setP('mA', Math.max(0, (v || 0) / 1000)), '10'),
+    numField('每來回一次振幅剩下（%）', P.keep, 1, v => setP('keep', Math.min(99, Math.max(5, v || 70))), '1')));
+  const S = swingSim(m), B = S.B, ax = swingAxle(o);
+  if(B.d <= 0) d.appendChild(warn('配重不足：重心在支點上方，靶會倒向一側而不是回到直立。請加重配重或加長配重端。'));
+  if(ax.low) d.appendChild(warn('支點會低於地面：支點到靶中心的距離大於靶中心高度，請縮短擺臂或提高靶。'));
+  const t = x => x == null ? '—' : fmt(x, 2) + ' 秒';
+  d.appendChild(el('div', {class:'readout', text:'轉動慣量 ' + fmt(B.I, 3) + ' kg·m²；重心在支點下 ' + fmt(B.d*100, 1) + ' 公分；擺動週期約 ' + t(S.period) + '。'}));
+  d.appendChild(el('div', {class:'readout', text:'解鎖後 ' + t(S.tCenter) + ' 第一次通過正中（最快，靶中心 ' + fmt(S.vMax, 2) + ' 公尺／秒）；' + t(S.tTurn) + ' 擺到對側最高點（' + fmt(S.turnAng ? S.turnAng*180/Math.PI : 0, 0) + '°，瞬間靜止）；約 ' + t(S.tSettle) + ' 後擺幅小於 3°。'}));
+  const cv = el('canvas', {class:'swingplot', 'aria-label':'擺動角度隨時間變化'}); d.appendChild(cv);
+  requestAnimationFrame(() => drawSwingPlot(cv, S));
+  d.appendChild(el('p', {class:'help', text:'模型：剛體繞低摩擦軸承轉動，Iα = −Mgd·sinθ − 軸承阻尼 − 空氣阻力 − 軸承靜摩擦；解鎖時角速度為 0。啟動來源與延遲用下方「啟動方式」設定。3D 回放依此擺動；路線計畫的可射擊時間仍以上方「啟動後幾秒開始可見／不再可見」計算，可參考圖中時間設定。'}));
+}
+function drawSwingPlot(cv, S){
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth || 300, H = 110;
+  cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr); cv.style.height = H + 'px';
+  const c = cv.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, W, H);
+  const T = Math.min(15, Math.max(4, (S.tSettle || 10) * 1.1)), A = Math.abs(S.th0), L = 26, Rr = W - 6, top = 8, bot = H - 18;
+  const X = t => L + t / T * (Rr - L), Y = a => (top + bot) / 2 - a / A * (bot - top) / 2;
+  c.strokeStyle = '#D6DCE2'; c.lineWidth = 1; c.beginPath(); c.moveTo(L, Y(0)); c.lineTo(Rr, Y(0)); c.stroke();
+  c.fillStyle = '#5B6773'; c.font = '10px sans-serif'; c.textAlign = 'right';
+  c.fillText(Math.round(A*180/Math.PI) + '°', L - 3, top + 8); c.fillText('0', L - 3, Y(0) + 3); c.fillText('-' + Math.round(A*180/Math.PI) + '°', L - 3, bot);
+  c.textAlign = 'center'; for(let s = 0; s <= T; s += T > 8 ? 2 : 1) c.fillText(s + 's', X(s), H - 4);
+  c.strokeStyle = '#6B3FA0'; c.lineWidth = 1.6; c.beginPath();
+  const step = Math.max(1, Math.floor(T / S.dt / (W * 2)));
+  for(let i = 0; i * S.dt <= T && i < S.th.length; i += step){ const x = X(i * S.dt), y = Y(S.th[i]); if(i === 0) c.moveTo(x, y); else c.lineTo(x, y); }
+  c.stroke();
+  if(S.tCenter != null){ c.fillStyle = '#C8372D'; c.beginPath(); c.arc(X(S.tCenter), Y(0), 3, 0, Math.PI*2); c.fill(); }
+}
 // manual 'cannot see from this viewpoint' marks: for curtains, pillars or a field layout the drawing does not show
 function renderHideProps(p, o, upd){
   const vps = stage.objects.filter(x => x.type === 'viewpoint').sort((a, b) => String(a.label).localeCompare(String(b.label), 'zh-Hant', {numeric:true}));
@@ -1753,10 +1792,8 @@ function renderMechProps(p, o, upd){
     d.appendChild(row(numField('啟動後幾秒開始可見', m.winFrom, 1, v => { m.winFrom = v; upd(false); }, '0.1'),
                       numField('啟動後幾秒不再可見', m.winTo, 1, v => { m.winTo = v; upd(false); }, '0.1')));
     d.appendChild(el('p', {class:'help', text:'可見時間窗從啟動當下起算。「不再可見」留空表示之後一直可見。'}));
-    if(m.type === 'swinger'){
-      d.appendChild(row(numField('擺動角度（度）', m.amp, 1, v => { m.amp = v; upd(false); }, '1'),
-                        numField('擺動一趟（秒）', m.period, 1, v => { m.period = v; upd(false); }, '0.1')));
-    }
+    if(m.type === 'swinger' && o.type === 'paper') renderSwingProps(d, o, m, upd);
+    else if(m.type === 'swinger') d.appendChild(el('p', {class:'help', text:'no-shoot 若要跟著擺動，請在 no-shoot 的「遮住哪個靶」選這個搖擺靶，並把搖擺參數設在該紙靶上。'}));
     if(m.type === 'slider'){
       d.appendChild(el('div', {class:'btns'}, el('button', {class:pendingSlide === o.id ? 'on' : '', text:pendingSlide === o.id ? '取消' : (m.ex != null ? '重新點選滑軌終點' : '點選滑軌終點'),
         onclick:() => { pendingSlide = pendingSlide === o.id ? null : o.id; pendingFace = null; setTool(tool); renderProps(); }})));

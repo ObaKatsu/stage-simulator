@@ -184,6 +184,59 @@ function newPlanFrom(source){
   const p = buildPlan(pts); plans().push(p); activePlanId = p.id; planChanged(true);
   if(p.unassigned.length) alert('以下靶沒有任何停頓點可射擊，未排入計畫：' + p.unassigned.map(id => getObj(id)?.label).join('、'));
 }
+/* drag a target row (by its handle) to change the shooting order, or onto another stop's list */
+let planDrag = null;
+function planDragStart(e, plan, k, j, li){
+  if(e.button != null && e.button !== 0) return;
+  e.preventDefault();
+  try{ window.getSelection().removeAllRanges(); }catch(err){}
+  const r = li.getBoundingClientRect();
+  const ghost = li.cloneNode(true); ghost.classList.add('dragghost'); ghost.style.width = r.width + 'px';
+  ghost.style.left = r.left + 'px'; ghost.style.top = r.top + 'px'; document.body.appendChild(ghost);
+  li.classList.add('dragsrc'); document.body.classList.add('pdrag');
+  planDrag = {plan, k, j, li, ghost, dy:e.clientY - r.top, dx:e.clientX - r.left, drop:null, id:e.pointerId};
+  try{ e.target.setPointerCapture(e.pointerId); }catch(err){}
+  const move = ev => planDragMove(ev), up = ev => { cleanup(); planDragEnd(true); }, cancel = () => { cleanup(); planDragEnd(false); };
+  const key = ev => { if(ev.key === 'Escape'){ cleanup(); planDragEnd(false); } };
+  const cleanup = () => { e.target.removeEventListener('pointermove', move); e.target.removeEventListener('pointerup', up); e.target.removeEventListener('pointercancel', cancel); document.removeEventListener('keydown', key); };
+  e.target.addEventListener('pointermove', move); e.target.addEventListener('pointerup', up); e.target.addEventListener('pointercancel', cancel); document.addEventListener('keydown', key);
+}
+function planDragMove(ev){
+  const D = planDrag; if(!D) return;
+  D.ghost.style.left = (ev.clientX - D.dx) + 'px'; D.ghost.style.top = (ev.clientY - D.dy) + 'px';
+  document.querySelectorAll('.tlist .dropbefore, .tlist .dropafter, .tlist.dropin').forEach(x => x.classList.remove('dropbefore', 'dropafter', 'dropin'));
+  D.drop = null;
+  const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+  const ul = hit && hit.closest ? (hit.closest('.tlist') || (hit.closest('.port') && hit.closest('.port').querySelector('.tlist'))) : null;
+  if(ul){
+    const k2 = +ul.dataset.stop, rows = [...ul.querySelectorAll(':scope > li')];
+    let idx = rows.length;
+    for(let i = 0; i < rows.length; i++){ const rr = rows[i].getBoundingClientRect(); if(ev.clientY < rr.top + rr.height / 2){ idx = i; break; } }
+    if(rows.length === 0) ul.classList.add('dropin');
+    else if(idx < rows.length) rows[idx].classList.add('dropbefore'); else rows[rows.length - 1].classList.add('dropafter');
+    D.drop = {k:k2, idx};
+  }
+  // keep the list scrolling while dragging near the edges of the side column
+  const side = document.querySelector('aside'), sr = side.getBoundingClientRect();
+  if(ev.clientY < sr.top + 40) side.scrollTop -= 12; else if(ev.clientY > sr.bottom - 40) side.scrollTop += 12;
+}
+function planDragEnd(commit){
+  const D = planDrag; planDrag = null; if(!D) return;
+  D.ghost.remove(); D.li.classList.remove('dragsrc'); document.body.classList.remove('pdrag');
+  document.querySelectorAll('.tlist .dropbefore, .tlist .dropafter, .tlist.dropin').forEach(x => x.classList.remove('dropbefore', 'dropafter', 'dropin'));
+  if(!commit || !D.drop) return;
+  const {plan} = D, src = plan.stops[D.k], dst = plan.stops[D.drop.k]; if(!src || !dst) return;
+  let idx = D.drop.idx;
+  if(src === dst){
+    if(idx === D.j || idx === D.j + 1) return;   // dropped where it already was
+    const [asg] = src.targets.splice(D.j, 1); if(idx > D.j) idx--; src.targets.splice(idx, 0, asg);
+  }else{
+    const asg = src.targets[D.j];
+    if(!confirmAssign(D.drop.k, dst, [asg.id])) return;
+    src.targets.splice(D.j, 1); dst.targets.splice(idx, 0, asg);
+  }
+  planChanged();
+}
 // can this stop actually shoot the target? used to warn when a target is moved to a stop that cannot see it
 function visProblem(r){
   if(!r) return '無法判斷視線';
@@ -221,6 +274,21 @@ function saveAsNewPlan(){
   plans().push(c); activePlanId = c.id; planBase = {id:c.id, json:JSON.stringify(c)};
   planChanged();
   if(typeof toast === 'function') toast('已另存為計畫 ' + c.name + (reverted ? '；計畫 ' + was + ' 恢復修改前的樣子。' : '。'), null, null, 4000);
+}
+/* moving targets: lateral aiming error added by judging the lead */
+const LEAD_JUDGE = 0.35;       // the lead actually held misses the needed lead by about this share (1 sd)
+const TRIGGER_JITTER = 0.03;   // seconds of trigger timing scatter while the target moves
+const AZONE_HALF = 0.035;      // half width of the A zone on a 30 cm Action Air target (approx., App. B2)
+function erfFn(x){ const s = Math.sign(x), a = Math.abs(x), t = 1 / (1 + 0.3275911 * a); return s * (1 - (((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592)*t*Math.exp(-a*a)); }
+function erfInv(y){ y = Math.min(0.999999, Math.max(-0.999999, y)); const a = 0.147, l = Math.log(1 - y*y), b = 2/(Math.PI*a) + l/2; return Math.sign(y) * Math.sqrt(Math.sqrt(b*b - l/a) - b); }
+// widen a hit distribution by an extra sideways error sig (m): A inside +-aw, on paper inside +-w
+function blurHd(hd, sig, w, aw){
+  const on0 = Math.max(1e-4, 1 - hd.M - hd.NS), A0 = Math.max(1e-4, hd.A);
+  const sA0 = aw / (Math.SQRT2 * erfInv(Math.min(0.9999, A0))), sO0 = w / (Math.SQRT2 * erfInv(Math.min(0.9999, on0)));
+  const A = erfFn(aw / (Math.SQRT2 * Math.hypot(sA0, sig))), on = Math.min(on0, erfFn(w / (Math.SQRT2 * Math.hypot(sO0, sig))));
+  const a2 = Math.min(A, on), cd = hd.C + hd.D, rest = Math.max(0, on - a2);
+  const C = cd > 0 ? hd.C / cd * rest : rest, D = cd > 0 ? hd.D / cd * rest : 0;
+  return {A:a2, C, D, M:hd.M + (on0 - on), NS:hd.NS};
 }
 function planChanged(persist){ planCache = null; if(typeof refreshReplayForPlan === 'function') refreshReplayForPlan(); renderPlanPanel(); if(typeof renderResultsPanel === 'function') renderResultsPanel(); if(typeof renderResultsPanel === 'function') renderResultsPanel(); renderViews(); if(persist !== false) saveStage(); }
 
@@ -268,7 +336,8 @@ function computePlan(plan, opts){
   const shots = [], warnings = [];
   let t = 0, prev = start ? [start.x, start.y] : (plan.stops[0] ? [plan.stops[0].x, plan.stops[0].y] : [0, 0]);
   let prevStance = 'stand', idx = 0, sumShoot = 0, sumMove = 0, sumWait = 0;
-  const shotTime = {};   // target id -> time of its last shot (for activations)
+  const shotTime = {};   // target id -> time of its last shot
+  const hitTime = {};    // target id -> when the BB of its last shot arrives (activations start from the hit)
   plan.stops.forEach((st, k) => {
     const vis = stopVisMemo(st);
     const d = Math.hypot(st.x - prev[0], st.y - prev[1]);
@@ -310,8 +379,10 @@ function computePlan(plan, opts){
       let sp = T.split[band] + (T.expPen[expo] || 0) + (steel ? T.steelPen : 0) + (st.stopType === 'move' ? T.moveSplitPen : 0) + (hasNS ? (T.nsPen || 0) : 0);
       if(oneHand) sp *= T.oneHandMult;
 
-      const hd = steel ? null : hitDist(band, expo, st.stopType, oneHand, hasNS), pS = steel ? steelP(band, st.stopType) : null;
+      const hd0 = steel ? null : hitDist(band, expo, st.stopType, oneHand, hasNS), pS = steel ? steelP(band, st.stopType) : null;
+      const flight = bbFlight(dist);
       for(let s = 0; s < asg.n; s++){
+        let hd = hd0, lead = null;
         let dt, kind, parts = {shoot:0, move:0, wait:0}, why = '';
         let emptyReload = 0;
         if(mag <= 0){ emptyReload = T.reloadStatic; mag = load; reloads++; reloadLog.push({stop:k, shot:idx, extra:T.reloadStatic, moving:false, forced:true}); if(rmode === 'manual') warnings.push('第 ' + (idx+1) + ' 槍前彈匣已空（每匣 ' + load + ' 發），模型自動加入定點換匣 ' + fmt(T.reloadStatic) + ' 秒；可把換匣安排改成「自動」，讓換匣排在移動中'); }
@@ -336,12 +407,21 @@ function computePlan(plan, opts){
         // moving targets: wait for the visible window
         if(isMech(o) && s === 0){
           const m = o.mech; let A = 0;
-          if(m.act.mode === 'object'){ const at = shotTime[m.act.id]; A = at != null ? at + (m.act.delay || 0) : null; if(A == null) warnings.push(o.label + ' 的啟動來源尚未在它之前射擊'); }
+          if(m.act.mode === 'object'){ const at = hitTime[m.act.id]; A = at != null ? at + (m.act.delay || 0) : null; if(A == null) warnings.push(o.label + ' 的啟動來源尚未在它之前射擊'); }
           if(A != null){
             const open = m.preVisible ? 0 : A + (m.winFrom || 0), close = m.winTo != null ? A + m.winTo : Infinity;
             const tShot = t + dt;
             if(tShot < open){ const w = open - tShot; dt += w; parts.wait += w; why = '等 ' + o.label + ' 出現 ' + fmt(w) + ' 秒'; }
             if(t + dt > close) warnings.push(o.label + ' 可能已錯過可見時間窗');
+          }
+        }
+        // a swinging target moves while the BB is in the air: the lead the shooter has to judge adds lateral error
+        if(!steel && isSwingPhys(o) && o.mech.act.mode !== 'none'){
+          const m = o.mech, at = m.act.mode === 'start' ? 0 : hitTime[m.act.id], A = at != null ? at + (m.act.mode === 'start' ? 0 : (m.act.delay || 0)) : null;
+          if(A != null){
+            const rel = t + dt + flight - A, h = 0.005, om = rel > 0 ? Math.abs(swingAngle(m, rel + h) - swingAngle(m, Math.max(1e-6, rel - h))) / (2*h) : 0;
+            const v = om * swingPar(m).rT, need = v * flight, sig = Math.hypot(LEAD_JUDGE * need, TRIGGER_JITTER * v);
+            if(v > 0.05){ hd = blurHd(hd0, sig, targetSpec(o.size).w / 2, AZONE_HALF * targetSpec(o.size).w / 0.30); lead = {v, need, sig}; why = (why ? why + '；' : '') + o.label + ' 擺動中，需提前約 ' + Math.round(need * 100) + ' 公分'; }
           }
         }
         const ov = plan.overrides && plan.overrides[idx];
@@ -351,14 +431,20 @@ function computePlan(plan, opts){
         const ep = !scored ? 0 : steel ? 5*pS - 10*(1 - pS) : 5*hd.A + 3*hd.C + hd.D - 10*hd.M - 10*hd.NS;
         let rlAt = emptyReload > 0, rlT = emptyReload;
         if(stopRl && !stopRl.used){ stopRl.used = true; rlAt = true; rlT += stopRl.extra; }
-        shots.push({i:idx, stop:k, target:o.id, label:o.label, kind, dt, t, parts, reloadT:rlT, reloadAt:rlAt, why:why || (parts.wait > 0.001 && firstAtStop === false && s === 0 && waitWhy.length ? waitWhy.join('、') : ''), ep, hd, pS, steel, scored, band, expo, overridden:ov != null, magLeft:mag, sp, kindKey:o.type});
-        shotTime[o.id] = t; prevTarget = o.id; idx++;
+        shots.push({i:idx, stop:k, target:o.id, label:o.label, kind, dt, t, parts, reloadT:rlT, reloadAt:rlAt, why:why || (parts.wait > 0.001 && firstAtStop === false && s === 0 && waitWhy.length ? waitWhy.join('、') : ''), ep, hd, pS, steel, scored, band, expo, overridden:ov != null, flight, fire:t, lead, dist, magLeft:mag, sp, kindKey:o.type});
+        shotTime[o.id] = t; hitTime[o.id] = t + flight; prevTarget = o.id; idx++;
       }
       // first shot row carries the reasons for waiting at this stop
     });
     if(waitWhy.length){ const f = shots.find(x => x.stop === k); if(f && !f.why) f.why = waitWhy.join('、'); }
     prev = [st.x, st.y]; prevStance = stance;
   });
+  // the timer stops when the BB hits the stop plate, so the last shot's flight time is part of the stage time
+  const lastShot = shots[shots.length - 1];
+  if(lastShot && lastShot.kindKey === 'stopplate' && lastShot.flight > 0){
+    const f = lastShot.flight; lastShot.t += f; lastShot.dt += f; lastShot.parts.wait += f; sumWait += f; t += f;
+    lastShot.why = (lastShot.why ? lastShot.why + '；' : '') + '含 BB 飛行 ' + fmt(f, 3) + ' 秒（stop plate 命中才停錶）';
+  }
   const total = t, ePts = shots.reduce((a, x) => a + x.ep, 0);
   const maxPts = shots.reduce((a, x) => a + (x.scored ? 5 : 0), 0);
   // Monte Carlo risk
@@ -581,13 +667,18 @@ function renderPlanPanel(){
       }}),
       picking ? el('button', {text:'完成並另存為新計畫 ' + nextPlanName(), onclick:saveAsNewPlan}) : null));
     if(picking) d.appendChild(el('p', {class:'help', text:'在俯視圖或 3D 以外的原圖上依序點靶。點到已在其他停頓點的靶會移到這裡；未點到的靶保持原順序排在後面。按 Esc 取消。'}));
-    const ul = el('ul', {class:'summ'});
+    const ul = el('ul', {class:'summ tlist'}); ul.dataset.stop = String(k);
     const svis = stopVisMemo(st);
     const badHere = st.targets.filter(x => visProblem(svis[x.id]));
     if(badHere.length) d.appendChild(warn('S' + (k+1) + ' 打不到：' + badHere.map(x => (getObj(x.id)?.label || '?') + '（' + visProblem(svis[x.id]) + '）').join('、') + '。請移到看得到的停頓點，或移動這個停頓點。'));
     st.targets.forEach((asg, j) => {
       const o = getObj(asg.id);
       const li = el('li', {class:visProblem(svis[asg.id]) ? 'bad' : ''});
+      li.dataset.stop = String(k); li.dataset.idx = String(j);
+      const hd = el('span', {class:'draghandle', title:'按住拖曳：調整射擊順序，或拖到其他停頓點', 'aria-label':'拖曳調整順序', text:'⠿'});
+      hd.addEventListener('pointerdown', e => planDragStart(e, plan, k, j, li));
+      li.appendChild(hd);
+      li.appendChild(el('span', {class:'ord', text:String(j + 1)}));
       li.appendChild(el('b', {text:(o ? o.label : '?') + ' '}));
       li.appendChild(visBadge(svis[asg.id]));
       const n = el('input', {type:'number', min:'1', step:'1', 'aria-label':'發數'}); n.value = asg.n; n.style.width = '52px';

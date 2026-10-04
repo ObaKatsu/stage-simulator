@@ -321,6 +321,18 @@ function planPath3d(floor, labels){
   });
 }
 function replayFigure(faces, labels, colOverride, tag){
+  // three.js renderer with the animated shooter: pose it, then add the muzzle flash, BB and label
+  if(typeof t3Figure === 'function' && t3Wanted() && T3.on && T3.assets && !T3.failed){
+    const F = t3Figure(colOverride);
+    if(F){
+      const t = RP.t, p = figPos(t), shotNow = RP.res.shots.some(x => t >= shotFire(x) && t - shotFire(x) < 0.05);
+      const m = F.gun.localToWorld(new THREE.Vector3(0, 0.035, 0.15)), muzzle = [m.x, -m.z, m.y];
+      replayTracers(faces, muzzle, t, shotNow);
+      const rl = (RP.rl || []).find(w => t >= w.a && t <= w.b);
+      labels.push({p:[p[0], p[1], figEye(t) + 0.35], t:(tag || ('射手' + (RP.cmp ? '（計畫 ' + RP.plan.name + '）' : ''))) + (rl ? '・換匣' : ''), c:colOverride || '#1F4E8C', pri:0});
+      return;
+    }
+  }
   const t = RP.t, p = figPos(t), seat = figSeat(t), base = seat ? 0 : figBase(t), eye = figEye(t) - base, stand = postureEye('stand');
   const shots = RP.res.shots; let aim = null, aimObj = null;
   const nxt = shots.find(x => x.t >= t - 0.12);
@@ -411,9 +423,13 @@ function replayFigure(faces, labels, colOverride, tag){
     if(gunShown){ muzzle = add(gH, gd, 0.2); limb(add(gH, gd, -0.02), muzzle, 0.05, dark); limb(gH, add(gH, [0, 0, -1], 0.08), 0.035, dark); }
     if(magAt) limb(magAt, add(magAt, [0, 0, 1], 0.1), 0.03, '#555');
   }
-  if(muzzle && shotNow) ball(muzzle, 0.07, '#F5B324');
-  // tracer to the target just shot
-  // BB in flight: drag slows it down, so it covers less ground every frame; a short trail shows the path
+  replayTracers(faces, muzzle, t, shotNow);
+  labels.push({p:[p[0], p[1], base + eye + 0.35], t:(tag || ('射手' + (RP.cmp ? '（計畫 ' + RP.plan.name + '）' : ''))) + (rlw ? '・換匣' : ''), c:col, pri:0});
+}
+// muzzle flash and the BB in flight: drag slows it down, so it covers less ground every frame; a short trail shows the path
+function replayTracers(faces, muzzle, t, shotNow){
+  const shots = RP.res.shots;
+  if(muzzle && shotNow) faces.push({dot:muzzle, fill:'#F5B324', wr:0.07, bias:-0.3});
   if(muzzle) shots.forEach(x => {
     const tf = shotFire(x), fl = x.flight || 0; if(t < tf || t > tf + fl + 0.03) return;
     const o = getObj(x.target); if(!o) return;
@@ -422,7 +438,6 @@ function replayFigure(faces, labels, colOverride, tag){
     const P = d => [muzzle[0] + (e[0] - muzzle[0]) * d / D, muzzle[1] + (e[1] - muzzle[1]) * d / D, muzzle[2] + (e[2] - muzzle[2]) * d / D];
     if(d1 < D){ faces.push({line:[P(d0), P(d1)], stroke:'rgba(245,179,36,.75)', lw:2, bias:-0.35}); faces.push({dot:P(d1), fill:'#FFF3B0', wr:0.012, bias:-0.36}); }
   });
-  labels.push({p:[p[0], p[1], base + eye + 0.35], t:(tag || ('射手' + (RP.cmp ? '（計畫 ' + RP.plan.name + '）' : ''))) + (rlw ? '・換匣' : ''), c:col, pri:0});
 }
 function replayMarks(faces){
   const t = RP.t, shots = RP.res.shots;

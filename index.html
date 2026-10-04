@@ -136,7 +136,7 @@
   <details open id="secObj" data-mode="build">
     <summary><span class="step">4</span>放置物件<span class="state" id="stObj"></span></summary>
     <div class="sec">
-      <p class="help">用上方工具列選擇物件，在任一側圖上點選放置。靶、鋼靶、Falling Plate、道具點一下；檔牆與邊線點起點和終點；射擊區與礦工隧道逐點點出頂點，點回第一點或按 Enter 完成。靶與牆一律點「與地面接觸的位置」。Delete 刪除選取的物件，Esc 取消。</p>
+      <p class="help">用上方工具列選擇物件，在任一側圖上點選放置。靶、鋼靶、Falling Plate、道具點一下；檔牆、邊線、礦工隧道與橋點起點和終點；射擊區逐點點出頂點，點回第一點或按 Enter 完成。靶與牆一律點「與地面接觸的位置」。Delete 刪除選取的物件，Esc 取消。</p>
       <label class="f" for="defTarget">新放置的紙靶尺寸</label>
       <select id="defTarget"><option value="normal">IPSC Action Air 紙靶</option><option value="micro">微型紙靶</option></select>
       <div class="btns"><button id="genAreas">由檔牆與邊線產生射擊區</button></div>
@@ -238,6 +238,7 @@
       <div class="v3dbar hidden" id="v3dBar">
         <select id="v3dMode" aria-label="3D 視角"><option value="orbit">環繞視角</option></select>
         <button id="v3dReset">重設視角</button>
+        <select id="v3dLook" aria-label="3D 畫面" title="精緻畫面使用光影與 3D 人物；手機或較舊的電腦可選低畫質或簡易"><option value="rich">精緻・豐富背景</option><option value="plain">精緻・簡潔背景</option><option value="low">精緻・低畫質</option><option value="basic">簡易</option></select>
       </div>
       <button id="wideBtn" title="隱藏俯視圖，讓左側畫面佔滿寬度">加寬畫面</button>
     </div>
@@ -308,6 +309,7 @@
 <script src="js/01-core.js"></script>
 <script src="js/02-visibility-3d.js"></script>
 <script src="js/02b-gl3d.js"></script>
+<script src="js/02c-three.js"></script>
 <script src="js/03-model-plan.js"></script>
 <script src="js/03b-montecarlo.js"></script>
 <script src="js/04-replay.js"></script>

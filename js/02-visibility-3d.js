@@ -129,7 +129,8 @@ function renderShooterBox(){
   box.appendChild(el('div', {class:'kind', text:'身體資料'}));
   box.appendChild(row(
     numField('身高（公分）', b.height, 100, v => { if(v > 1){ applyHeight(v); saveProfile(); renderPostureBox(); objectsChanged(false); renderShooterBox(); } }, '1'),
-    selField('慣用手', [['right','右手'],['left','左手']], b.hand, v => { b.hand = v; upd(); })));
+    selField('慣用手', [['right','右手'],['left','左手']], b.hand, v => { b.hand = v; upd(); }),
+    selField('3D 人物', [['male','男性'],['female','女性']], b.gender || 'male', v => { b.gender = v; upd(); if(typeof render3d === 'function') render3d(); })));
   box.appendChild(el('p', {class:'help', text:'輸入身高會自動設定站姿眼高（身高減 8 公分），並依比例調整其他姿態的估計眼高；已實測修改的眼高不受影響。'}));
   box.appendChild(numField('橫向移動 3 公尺所需時間（秒，含起步；空白表示與前後移動相同）', b.lateral3m, 1, v => { b.lateral3m = v > 0 ? v : null; upd(); }, '0.01'));
   box.appendChild(el('div', {class:'kind', text:'換靶轉動（' + (b.fitted ? '已依實測擬合' : '估計值') + '）'}));
@@ -777,9 +778,10 @@ function build3d(statusMap, cam){
       const g = paperGeom(o), off = o.type === 'noshoot' ? 0.012 : 0;
       const dz = o.type === 'noshoot' ? (o.dz || 0) : 0;
       const pts = g.oct.map(([u, v]) => { const w = g.toW(u, v - dz*100); return [w[0] + g.f[0]*off, w[1] + g.f[1]*off, w[2]]; });
-      faces.push({pts, fill:o.type === 'paper' ? '#D2A86E' : '#FAFAFA', stroke:hl || (o.type === 'paper' ? '#7A5424' : '#333'), lw:hl ? 3 : 1.2, bias:o.type === 'noshoot' ? -0.02 : 0});
+      faces.push({pts, fill:o.type === 'paper' ? '#D2A86E' : '#FAFAFA', stroke:hl || (o.type === 'paper' ? '#7A5424' : '#333'), lw:hl ? 3 : 1.2, bias:o.type === 'noshoot' ? -0.02 : 0,
+        tex:o.type === 'paper' ? 'paper' : 'noshoot', uvs:g.oct.map(([u, v]) => [u / g.W, 1 - v / g.H]), hl:!!hl});   // tex/uvs: three.js renderer draws the scored target face
       if(o.type === 'paper'){
-        faces.push({pts:g.az.map(([u, v]) => g.toW(u, v)).map(w => [w[0] + g.f[0]*0.001, w[1] + g.f[1]*0.001, w[2]]), fill:null, stroke:'rgba(122,84,36,.8)', lw:1, bias:-0.01});
+        faces.push({azone:true, pts:g.az.map(([u, v]) => g.toW(u, v)).map(w => [w[0] + g.f[0]*0.001, w[1] + g.f[1]*0.001, w[2]]), fill:null, stroke:'rgba(122,84,36,.8)', lw:1, bias:-0.01});
         const l = g.toW(0, g.H/2), r2 = g.toW(g.W, g.H/2);
         if(isSwingPhys(o)) swingFrame3d(faces, o, g, solid);
         else if(solid){
@@ -858,12 +860,22 @@ function render3d(){
   if(leftTab !== '3d' || !v3d.w) return;
   const ctx = v3dCtx, dpr = window.devicePixelRatio || 1;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const useGL = typeof gl3dInit === 'function' && gl3dInit();
+  const want3 = typeof t3Wanted === 'function' && t3Wanted() && t3Ensure();
+  const useGL = !want3 && typeof gl3dInit === 'function' && gl3dInit();
   const cam = camera();
+  if(typeof T3 !== 'undefined') T3.figUsed = 0;
   let statusMap = null;
   if(cam.vp && !RP.on){ statusMap = {}; computeVis(cam.vp).forEach(r => statusMap[r.id] = r.nomStatus || r.status); }
   const {floor, faces, labels} = build3d(statusMap, cam);
-  if(useGL && gl3dRender(cam, floor, faces, V3D_BG)){
+  if(want3 && t3Render(cam, floor, faces)){
+    ctx.clearRect(0, 0, v3d.w, v3d.h);
+    draw3dLabels(ctx, cam, labels, statusMap);
+    draw3dOverlay(ctx, cam);
+    return;
+  }
+  if(typeof t3Hide === 'function') t3Hide();
+  if(want3 && !useGL && typeof gl3dInit === 'function') gl3dInit();
+  if(typeof GL3D !== 'undefined' && GL3D.active && gl3dRender(cam, floor, faces, V3D_BG)){
     ctx.clearRect(0, 0, v3d.w, v3d.h);
     draw3dLabels(ctx, cam, labels, statusMap);
     draw3dOverlay(ctx, cam);

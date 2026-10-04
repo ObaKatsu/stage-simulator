@@ -154,6 +154,7 @@ function initUI(){
   const syncWide = () => { document.body.classList.toggle('wide', !!UI.wide); $('wideBtn').textContent = UI.wide ? '顯示俯視圖' : '加寬畫面'; };
   $('wideBtn').addEventListener('click', () => { UI.wide = !UI.wide; saveUI(); syncWide(); setTimeout(() => { if(typeof resize3d === 'function') resize3d(); imgView.render(); topView.render(); }, 0); });
   syncWide();
+  { const lk = $('v3dLook'); if(lk){ lk.value = t3Look(); lk.addEventListener('change', () => { UI.look3 = lk.value; saveUI(); render3d(); }); } }
   initVideo(); renderClipsPanel(); renderStgCatalogInfo(); initMobile(); initPWA();
   updateQuickShooter(); updateQuickPlan();
   setupAside();

@@ -1026,9 +1026,27 @@ let stopSuggest = null;   // {cands, proposals, uncovered, shown, key}
 // suggestions belong to one layout: anything but viewpoints changing makes them out of date
 function suggestKey(){ return JSON.stringify([stage.objects.filter(o => o.type !== 'viewpoint'), stage.safety, stage.flex, stage.plateCy, PROFILE.lean, PROFILE.postures]); }
 function suggestStale(){ return !!(stopSuggest && stopSuggest.key !== suggestKey()); }
+// where a shooter may stand: the shooting areas; without any, the ranges closed by walls and fault lines;
+// without those, the floor from its front edge to 1 m before the nearest target
+function suggestRegions(){
+  const areas = stage.objects.filter(o => o.type === 'area' && o.pts && o.pts.length >= 3).map(o => o.pts);
+  if(areas.length) return {polys:areas, src:'area'};
+  const segs = stage.objects.filter(o => o.type === 'wall' || o.type === 'faultline').map(o => ({a:[o.x1, o.y1], b:[o.x2, o.y2], type:o.type, ref:o.id}));
+  const faces = segs.length ? findFaces(segs, SNAP_TOL).filter(f => f.area > 0.3 && f.types.has('faultline')) : [];
+  if(faces.length) return {polys:faces.map(f => f.pts), src:'walls'};
+  const tg = stage.objects.filter(o => ['paper','popper','plate','stopplate'].includes(o.type));
+  const xs = stage.objects.filter(o => o.x != null).map(o => o.x).concat(stage.objects.filter(o => o.x1 != null).flatMap(o => [o.x1, o.x2]));
+  const st = stage.objects.find(o => o.type === 'start');
+  const yTop = Math.min(...tg.map(o => o.y)) - 1.0, yBot = Math.min(st ? st.y - 0.5 : Infinity, ...stage.objects.filter(o => o.y != null).map(o => o.y)) - 0.2;
+  const x0 = Math.min(...xs) - 0.5, x1 = Math.max(...xs) + 0.5;
+  if(!(yTop > yBot + 0.5) || !isFinite(x0)) return {polys:[], src:'none'};
+  return {polys:[[[x0, yBot], [x1, yBot], [x1, yTop], [x0, yTop]]], src:'floor'};
+}
 function candidatePoints(step){
   const pts = [];
-  stage.objects.filter(o => o.type === 'area' && o.pts && o.pts.length >= 3).forEach(a => {
+  candidatePoints.src = 'none';
+  const R = suggestRegions(); candidatePoints.src = R.src;
+  R.polys.map(p => ({pts:p})).forEach(a => {
     let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
     a.pts.forEach(p => { xmin = Math.min(xmin, p[0]); xmax = Math.max(xmax, p[0]); ymin = Math.min(ymin, p[1]); ymax = Math.max(ymax, p[1]); });
     for(let x = Math.ceil(xmin / step) * step; x <= xmax; x += step) for(let y = Math.ceil(ymin / step) * step; y <= ymax; y += step){
@@ -1063,7 +1081,7 @@ function runStopSuggest(){
   const targets = stage.objects.filter(o => ['paper','popper','plate','stopplate'].includes(o.type));
   if(!targets.length){ out.appendChild(el('p', {class:'help', text:'圖上尚無靶。'})); return; }
   const pts = candidatePoints(0.5);
-  if(!pts.length){ out.appendChild(warn('找不到候選點。請先建立射擊區（描出或由檔牆與邊線產生）。')); return; }
+  if(!pts.length){ out.appendChild(warn('找不到候選點。請建立射擊區（描出或由檔牆與邊線產生），或放置起始位置與靶。')); return; }
   const prog = el('div', {class:'readout', text:'計算中… 0 / ' + pts.length}); out.appendChild(prog);
   const rows = []; let i = 0;
   const step = () => {
@@ -1153,7 +1171,7 @@ function finishSuggest(rows, targets){
     const prev = useful[useful.length - 1];
     if(!prev || (allUsed && pr.score > prev.score + 0.3)) useful.push(pr);
   });
-  stopSuggest = {proposals:useful, uncovered, ncand:rows.length, shown:useful.length ? 0 : -1, key:suggestKey()};
+  stopSuggest = {proposals:useful, uncovered, ncand:rows.length, shown:useful.length ? 0 : -1, key:suggestKey(), src:candidatePoints.src};
   renderSuggest(); renderViews();
 }
 function renderSuggest(){
@@ -1165,7 +1183,9 @@ function renderSuggest(){
     return;
   }
   const S = stopSuggest;
-  out.appendChild(el('div', {class:'readout', text:'在射擊區內每 50 公分取候選點，共 ' + S.ncand + ' 個。以可射擊比例 50% 以上、且在安全射擊角度內視為可交戰。'}));
+  const where = {area:'在射擊區內', walls:'在檔牆與邊線圍成的範圍內（尚未建立射擊區，這個範圍沒有存成射擊區）', floor:'在場地前方到最近靶前 1 公尺的範圍內（尚未建立射擊區）'}[S.src || 'area'] || '在射擊區內';
+  out.appendChild(el('div', {class:'readout', text:where + '每 50 公分取候選點，共 ' + S.ncand + ' 個。以可射擊比例 50% 以上、且在安全射擊角度內視為可交戰。'}));
+  if(S.src === 'floor') out.appendChild(warn('沒有射擊區也沒有封閉的邊線，建議點可能落在實際射擊區外（越過邊線射擊會被罰）。請對照現場邊線，或先建立射擊區再計算。'));
   if(S.uncovered.length) out.appendChild(warn('沒有任何候選點可射擊：' + S.uncovered.map(id => getObj(id)?.label).join('、') + '。請檢查遮蔽、no-shoot 位置或射擊區範圍。'));
   if(!S.proposals.length){ out.appendChild(warn('找不到能涵蓋所有靶的停頓點組合。')); return; }
   S.proposals.forEach((pr, pi) => {

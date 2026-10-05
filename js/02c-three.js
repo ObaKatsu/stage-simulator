@@ -240,10 +240,12 @@ function t3MakeShooter(female, style, height){
     cl[v*4] = r; cl[v*4+1] = g; cl[v*4+2] = b; cl[v*4+3] = Math.min(1, Math.max(0, (a - 0.35) / 0.3));
   }
   G.setAttribute('clothes', new THREE.BufferAttribute(cl, 4));
-  const m = skinned.material.clone(); m.roughness = 0.75;
+  const m = skinned.material.clone();
   m.onBeforeCompile = sh => {
     sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nattribute vec4 clothes;\nvarying vec4 vClothes;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvClothes = clothes;');
-    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec4 vClothes;').replace('#include <map_fragment>', '#include <map_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vClothes.rgb, vClothes.a);');
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec4 vClothes;').replace('#include <map_fragment>', '#include <map_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vClothes.rgb, vClothes.a);')
+      .replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\nnormal = normalize(mix(normal, geometryNormal, vClothes.a * 0.75));')   // fabric: soften the skin relief of the normal map
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 0.85, vClothes.a);');
   };
   m.customProgramCacheKey = () => 'clothes';
   skinned.material = m;
@@ -268,44 +270,124 @@ function t3MakeShooter(female, style, height){
   const grip = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.11, 0.045), gm); grip.rotation.x = 0.25; grip.position.set(0, -0.02, -0.01); gun.add(grip);
   const optic = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.025, 0.03), std('#30343A', 0.3, 0.5)); optic.position.set(0, 0.065, 0); gun.add(optic);
   gun.scale.setScalar(s); gun.position.copy(hw).add(new THREE.Vector3(0, 0.035*s, 0.04*s)); gun.traverse(o => o.castShadow = true); gun.updateMatrixWorld(true); hand.attach(gun);
-  aim.stop();
-  root.userData.keep = true;
-  return {root, mixer, actions:{}, gun, key:''};
+  aim.stop(); mixer.update(0); skinned.skeleton.pose(); root.updateMatrixWorld(true);
+  // holster on the right hip with a gun in it (shown before the draw), and a loose gun for starts with the gun on a table or barrel
+  const pel = bone('pelvis'), pw = new THREE.Vector3(); pel.getWorldPosition(pw);
+  const holster = new THREE.Group(), hm = std('#1E2328', 0.6);
+  const hb = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.16, 0.09), hm); holster.add(hb);
+  const hg = gun.clone(true); hg.scale.setScalar(1); hg.rotation.set(Math.PI / 2, 0, 0); hg.position.set(0, 0.07, -0.02); holster.add(hg);
+  holster.scale.setScalar(s); holster.position.set(pw.x - 0.2 * s, pw.y - 0.06 * s, pw.z); holster.traverse(o => o.castShadow = true); holster.updateMatrixWorld(true); pel.attach(holster);
+  const tableGun = gun.clone(true); tableGun.scale.setScalar(s); tableGun.visible = false; tableGun.traverse(o => o.castShadow = true);
+  root.userData.keep = true; tableGun.userData.keep = true;
+  return {root, mixer, actions:{}, gun, key:'', holsterGun:hg, tableGun, bone};
 }
 function t3Act(F, name, part){ const key = name + (part ? ':' + part : ''); let a = F.actions[key]; if(!a){ const clip = part ? T3.assets.part[key] : T3.assets.clips[name]; if(!clip) return null; a = F.mixer.clipAction(clip); F.actions[key] = a; } return a; }
+// smoothstep 0..1
+const t3S = x => { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+// rotate a bone about a world-space axis (used to spread the legs when straddling)
+function t3RotBone(b, axis, ang){
+  if(!b || !b.parent) return;
+  const q = new THREE.Quaternion().setFromAxisAngle(axis, ang), wq = new THREE.Quaternion(), pq = new THREE.Quaternion();
+  b.getWorldQuaternion(wq); b.parent.getWorldQuaternion(pq);
+  b.quaternion.copy(pq.invert().multiply(q.multiply(wq)));
+}
+// start sequence from the beep: rise from a seat, draw from the holster or pick up the gun, load / rack, then aim
+function t3StartPhases(){
+  const c = stage.startCond || {}, T = PROFILE.time, shots = RP.res.shots, first = shots.length ? shotFire(shots[0]) : 0;
+  const rise = startRise(), load = c.ready === 'unloaded' ? (T.loadExtra || 0) + (T.emptyChamber || 0) : c.ready === 'emptyChamber' ? (T.emptyChamber || 0) : 0;
+  const pick = c.gunLoc === 'object', drawDur = pick ? 0.9 : 0.6;
+  const drawEnd = Math.max(rise + drawDur, first - 0.15 - load), drawStart = Math.max(rise, drawEnd - drawDur);
+  return {rise, drawStart, drawEnd, loadEnd:drawEnd + load, first, pick, gunObj:pick ? getObj(c.gunObj) : null};
+}
 // pose the shooter for replay time t (called while the replay context of that figure is active)
 function t3PoseShooter(F, t){
-  const p = figPos(t), k = stopAt(t), mv = RP.stops.find(s => t > s.dep && t < s.arr), seat = figSeat(t), base = seat ? 0 : figBase(t);
+  const p = figPos(t), k = stopAt(t), mv = RP.stops.find(s => t > s.dep && t < s.arr), seat = figSeat(t);
+  // smooth step up / down onto podiums, bridges and boats instead of a jump
+  const base = seat ? 0 : (() => { let a = 0, n = 0; [-0.18, -0.09, 0, 0.09, 0.18].forEach(d => { const q = figPos(Math.max(0, t + d)); a += surfaceAt(q[0], q[1]); n++; }); return a / n; })();
   Object.values(F.actions).forEach(a => { a.enabled = false; a.setEffectiveWeight(0); });
-  const use = (name, part, time, w) => { const a = t3Act(F, name, part); if(!a) return; const d = a.getClip().duration; a.enabled = true; a.play(); a.setEffectiveWeight(w == null ? 1 : w); a.time = ((time % d) + d) % d; };
+  const use = (name, part, time, w) => { const a = t3Act(F, name, part); if(!a) return; const d = a.getClip().duration; a.enabled = true; a.play(); a.setEffectiveWeight(w == null ? 1 : w); a.time = Math.max(0, Math.min(d - 1e-4, time)); };
+  const loop = (name, part, time, w) => { const a = t3Act(F, name, part); if(!a) return; const d = a.getClip().duration; use(name, part, ((time % d) + d) % d, w); };
+  const dur = n => T3.assets.clips[n] ? T3.assets.clips[n].duration : 1;
   const shots = RP.res.shots, nxt = shots.find(x => x.t >= t - 0.12), aimObj = nxt && k >= 0 && nxt.stop === k ? getObj(nxt.target) : null;
-  const rl = (RP.rl || []).find(w => t >= w.a && t <= w.b);
+  const rl = (RP.rl || []).find(w => t >= w.a && t <= w.b), T = PROFILE.time;
   const shotAgo = shots.reduce((m, x) => { const d = t - shotFire(x); return d >= 0 && d < m ? d : m; }, 9);
-  const first = shots.length ? shotFire(shots[0]) : 0, sc = stage.startCond || {};
-  let dir, pitchDown = 0;
+  const S = t3StartPhases();
+  let gunIn = 'hand', dir, prone = false, straddle = false, fullBody = false;
+  const aimUpper = (w0) => {
+    const eye = figEye(t), tz = aimObj ? tgtCenterZ(aimObj) : eye, dd = aimObj ? Math.hypot(aimObj.x - p[0], aimObj.y - p[1]) : 5, pitch = Math.atan2(tz - eye, dd);
+    const u = Math.max(-1, Math.min(1, pitch / 0.7)), w = w0 == null ? 1 : w0;
+    use('Pistol_Aim_Neutral', 'up', 0, w * (1 - Math.abs(u))); use(u > 0 ? 'Pistol_Aim_Up' : 'Pistol_Aim_Down', 'up', 0, w * Math.abs(u));
+    if(shotAgo < 0.15) use('Pistol_Shoot', 'up', shotAgo, 0.6 * w);
+  };
+  // upper body while the start sequence is running (also used while moving off the start)
+  const startUpper = () => {
+    if(t < S.drawStart){ loop('Idle_Loop', 'up', t); gunIn = S.pick ? 'object' : 'holster'; return true; }
+    if(t < S.drawEnd){ const u = t3S((t - S.drawStart) / (S.drawEnd - S.drawStart));
+      if(S.pick){ use('PickUp_Table', 'up', u * dur('PickUp_Table')); gunIn = u < 0.6 ? 'object' : 'hand'; }
+      else { loop('Idle_Loop', 'up', t, 1 - u); aimUpper(u); gunIn = u < 0.35 ? 'holster' : 'hand'; }
+      return true; }
+    if(t < S.loadEnd){ use('Pistol_Reload', 'up', (t - S.drawEnd) / Math.max(0.3, S.loadEnd - S.drawEnd) * dur('Pistol_Reload')); return true; }
+    return false;
+  };
   if(mv){
-    const tn = inTunnel(p[0], p[1]);
-    use(tn ? 'Crouch_Fwd_Loop' : 'Jog_Fwd_Loop', null, (t - mv.dep) * 1.1);
+    const k2 = RP.stops.indexOf(mv), prevSit = k2 > 0 && RP.stops[k2 - 1].stance === 'sit', sinceDep = t - mv.dep;
+    const standUp = prevSit ? ((seatAt(mv.from[0], mv.from[1]) || {}).straddle ? (T.dismount || 1) : (T.standUp || 0.6)) : 0;
+    const dist = Math.hypot(mv.to[0] - mv.from[0], mv.to[1] - mv.from[1]), v = dist / Math.max(0.1, mv.arr - mv.dep);
+    if(prevSit && sinceDep < standUp){ use('Sitting_Exit', null, sinceDep / standUp * dur('Sitting_Exit')); fullBody = true; }
+    else if(k2 === 0 && S.rise && t < S.rise){ use('Sitting_Exit', null, t / S.rise * dur('Sitting_Exit')); fullBody = true; }
+    else {
+      const tn = inTunnel(p[0], p[1]);
+      if(tn) loop('Crouch_Fwd_Loop', null, sinceDep * 1.1);
+      else if(v < 1.6){ loop('Walk_Loop', 'low', sinceDep * Math.max(0.7, v / 1.3)); }
+      else loop('Jog_Fwd_Loop', 'low', sinceDep * 1.1);
+      if(!tn){ if(t < S.loadEnd && startUpper()); else if(rl) use('Pistol_Reload', 'up', (t - rl.a) / Math.max(0.3, rl.b - rl.a) * dur('Pistol_Reload')); else loop('Pistol_Idle_Loop', 'up', t); }
+    }
     dir = [mv.to[0] - mv.from[0], mv.to[1] - mv.from[1]];
   }else{
-    const st = k >= 0 ? RP.stops[k].stance : 'stand';
-    const low = seat ? 'Sitting_Idle_Loop' : st === 'kneel' ? 'Fixing_Kneeling' : (st === 'half' || st === 'crouch' || st === 'prone') ? 'Crouch_Idle_Loop' : 'Pistol_Idle_Loop';
-    use(low, 'low', t);
-    if(t < first - 0.35 && k < 0) use(sc.gunLoc === 'object' ? 'Idle_Loop' : 'Idle_Loop', 'up', t);   // before the draw
-    else if(rl) use('Pistol_Reload', 'up', (t - rl.a) / Math.max(0.3, rl.b - rl.a) * T3.assets.clips['Pistol_Reload'].duration);
-    else if(aimObj || k >= 0 || t >= first - 0.35){
-      const eye = figEye(t), tz = aimObj ? tgtCenterZ(aimObj) : eye, dd = aimObj ? Math.hypot(aimObj.x - p[0], aimObj.y - p[1]) : 5, pitch = Math.atan2(tz - eye, dd);
-      const u = Math.max(-1, Math.min(1, pitch / 0.7));
-      use('Pistol_Aim_Neutral', 'up', 0, 1 - Math.abs(u)); use(u > 0 ? 'Pistol_Aim_Up' : 'Pistol_Aim_Down', 'up', 0, Math.abs(u));
-      if(shotAgo < 0.15) use('Pistol_Shoot', 'up', shotAgo, 0.6);
-    }else use('Pistol_Idle_Loop', 'up', t);
-    if(st === 'prone' && !seat) pitchDown = 1.35;   // no prone clip in the library: lay the crouched body forward
+    const st = k >= 0 ? RP.stops[k].stance : 'stand', S0 = k >= 0 ? RP.stops[k] : null, sinceArr = S0 ? t - S0.arr : 0;
+    const firstAt = k >= 0 ? shots.find(x => x.stop === k) : null, opening = firstAt && /開窗/.test(firstAt.why || '') && sinceArr >= 0 && sinceArr < (T.windowOpen || 0.5);
+    const sitting = seat && st === 'sit' && k >= 0 && !(k === 0 && stage.startCond.pose && stage.startCond.pose !== 'stand') && !(k > 0 && RP.stops[k - 1].stance === 'sit' && Math.hypot(RP.stops[k-1].to[0] - S0.to[0], RP.stops[k-1].to[1] - S0.to[1]) < 0.05) && sinceArr >= 0 && sinceArr < (T.sitDown || 0.6);
+    prone = st === 'prone' && !seat; straddle = !!(seat && seat.straddle);
+    if(k < 0 && S.rise && t < S.rise){ use('Sitting_Exit', null, t / S.rise * dur('Sitting_Exit')); fullBody = true; gunIn = S.pick ? 'object' : 'holster'; }
+    else if(sitting){ use('Sitting_Enter', null, sinceArr / (T.sitDown || 0.6) * dur('Sitting_Enter')); fullBody = true; }
+    else {
+      const low = seat ? 'Sitting_Idle_Loop' : prone ? 'Idle_Loop' : st === 'kneel' ? 'Fixing_Kneeling' : (st === 'half' || st === 'crouch') ? 'Crouch_Idle_Loop' : 'Pistol_Idle_Loop';
+      loop(low, 'low', low === 'Fixing_Kneeling' ? 0.5 : t);
+      if(t < S.loadEnd && (k < 0 || shots.every(x => shotFire(x) >= t)) && startUpper());
+      else if(rl) use('Pistol_Reload', 'up', (t - rl.a) / Math.max(0.3, rl.b - rl.a) * dur('Pistol_Reload'));
+      else if(opening) use('Interact', 'up', Math.min(0.55, sinceArr / (T.windowOpen || 0.5)) * dur('Interact'));
+      else if(prone){ use('Pistol_Aim_Up', 'up', 0, 1); if(shotAgo < 0.15) use('Pistol_Shoot', 'up', shotAgo, 0.5); }
+      else aimUpper();
+    }
     const aA = aimObj ? aimDirAt(t, p) : null;
     dir = aA != null ? [Math.cos(aA), Math.sin(aA)] : aimObj ? [aimObj.x - p[0], aimObj.y - p[1]] : (seat && seat.obj && seat.obj.rot != null ? facing(seat.obj.rot) : downDir());
+    if(straddle && seat.obj && seat.obj.rot != null){ F.aimYaw = Math.atan2(dir[0], -dir[1]); dir = facing(seat.obj.rot); }   // legs stay along the horse; the upper body turns
+    else F.aimYaw = null;
   }
   F.mixer.update(0);
-  F.root.position.copy(W3(p[0], p[1], base + (pitchDown ? 0.22 : 0)));
-  F.root.rotation.set(0, Math.atan2(dir[0], -dir[1]), 0, 'YXZ'); F.root.rotation.x = pitchDown;
+  const yaw = Math.atan2(dir[0], -dir[1]);
+  F.root.rotation.set(0, yaw, 0, 'YXZ');
+  if(prone){
+    // no prone clip: lay the body flat facing the target, chest slightly raised, eyes at the stop point
+    const L = (PROFILE.body && PROFILE.body.height) || 1.76, f = [Math.sin(yaw), Math.cos(yaw)];
+    F.root.rotation.x = 1.42;
+    const w = W3(p[0], p[1], 0.1); F.root.position.set(w.x - f[0] * L * 0.86, 0.1, w.z - f[1] * L * 0.86);
+  }else F.root.position.copy(W3(p[0], p[1], base));
+  F.root.updateMatrixWorld(true);
+  if(straddle){   // legs either side of the horse / barrel
+    const fw = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+    t3RotBone(F.bone('thigh_l'), fw, -0.55); t3RotBone(F.bone('thigh_r'), fw, 0.55);
+    if(F.aimYaw != null){ let dy = F.aimYaw - yaw; while(dy > Math.PI) dy -= 2*Math.PI; while(dy < -Math.PI) dy += 2*Math.PI;
+      dy = Math.max(-1.6, Math.min(1.6, dy)); F.root.updateMatrixWorld(true); const up = new THREE.Vector3(0, 1, 0);
+      t3RotBone(F.bone('spine_01'), up, dy * 0.4); F.root.updateMatrixWorld(true); t3RotBone(F.bone('spine_02'), up, dy * 0.3); F.root.updateMatrixWorld(true); t3RotBone(F.bone('spine_03'), up, dy * 0.3); }
+    F.root.updateMatrixWorld(true);
+  }
+  // where the gun is: in the hand, in the holster, or still on the table / barrel
+  F.gun.visible = gunIn === 'hand'; if(F.holsterGun) F.holsterGun.visible = gunIn === 'holster';
+  if(F.tableGun){
+    F.tableGun.visible = gunIn === 'object' && !!S.gunObj;
+    if(F.tableGun.visible){ const o = S.gunObj, top = o.type === 'table' ? (o.h || 0.75) : o.type === 'barrel' ? (o.h || 0.9) : (o.h || 0.5); F.tableGun.position.copy(W3(o.x, o.y, top + 0.02)); F.tableGun.rotation.set(Math.PI / 2, 0, Math.random() * 0); }
+  }
 }
 // called by replayFigure when the three.js renderer and the models are ready
 function t3Figure(colOverride){
@@ -313,7 +395,7 @@ function t3Figure(colOverride){
   const b = PROFILE.body || {}, female = b.gender === 'female', h = b.height || 1.76, idx = T3.figUsed++;
   const key = [female, h, colOverride || ''].join('|');
   let F = T3.figs[idx];
-  if(!F || F.key !== key){ if(F) T3.dyn.remove(F.root); F = t3MakeShooter(female, colOverride ? T3_STYLE_CMP : null, h); F.key = key; T3.figs[idx] = F; T3.dyn.add(F.root); }
+  if(!F || F.key !== key){ if(F){ T3.dyn.remove(F.root); T3.dyn.remove(F.tableGun); } F = t3MakeShooter(female, colOverride ? T3_STYLE_CMP : null, h); F.key = key; T3.figs[idx] = F; T3.dyn.add(F.root); T3.dyn.add(F.tableGun); }
   F.root.visible = true; t3PoseShooter(F, RP.t); F.root.updateMatrixWorld(true);
   return F;
 }
@@ -325,7 +407,7 @@ function t3Render(cam, floor, faces){
   T3.canvas.style.display = 'block'; const gl = $('v3dGL'); if(gl) gl.style.visibility = 'hidden';
   t3Surroundings(set.bg === 'rich');
   t3Build(floor, faces);
-  T3.figs.forEach((F, i) => { if(F) F.root.visible = i < T3.figUsed; });
+  T3.figs.forEach((F, i) => { if(F){ F.root.visible = i < T3.figUsed; if(i >= T3.figUsed) F.tableGun.visible = false; } });
   const e = topExt, cx = (e.xmin + e.xmax)/2, cy = (e.ymin + e.ymax)/2, span = Math.max(e.xmax - e.xmin, e.ymax - e.ymin) * 0.75 + 4;
   T3.sun.position.copy(W3(cx - span*0.5, cy - span*0.8, span*1.6)); T3.sun.target.position.copy(W3(cx, cy, 0));
   const sc = T3.sun.shadow.camera; sc.left = -span; sc.right = span; sc.top = span; sc.bottom = -span; sc.near = 0.5; sc.far = span*5; sc.updateProjectionMatrix();

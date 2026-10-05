@@ -479,8 +479,9 @@ function bindPointer(view, h){
       down = null; pinch = pinchState(); return;
     }
     if(touches.size > 2) return;
-    down = {sx, sy, tx:view.tx, ty:view.ty, moved:false, grabbed:false};
-    if(e.button === 0 && h.grab) down.grabbed = h.grab(sx, sy);
+    // a finger tap always wobbles a little: allow more movement before a touch counts as a drag
+    down = {sx, sy, tx:view.tx, ty:view.ty, moved:false, grabbed:false, slop:e.pointerType === 'touch' ? 12 : e.pointerType === 'pen' ? 8 : 4};
+    if((e.button === 0 || e.pointerType === 'touch') && h.grab) down.grabbed = h.grab(sx, sy);
   });
   c.addEventListener('pointermove', e => {
     const [sx, sy] = pos(e);
@@ -492,7 +493,7 @@ function bindPointer(view, h){
       pinch = n; return;
     }
     if(down){
-      if(Math.hypot(sx - down.sx, sy - down.sy) > 4) down.moved = true;
+      if(!down.moved && Math.hypot(sx - down.sx, sy - down.sy) > down.slop) down.moved = true;
       if(down.grabbed){ if(down.moved) h.drag && h.drag(sx, sy, e); }
       else if(down.moved){ view.tx = down.tx + sx - down.sx; view.ty = down.ty + sy - down.sy; view.render(); }
     }
@@ -505,7 +506,7 @@ function bindPointer(view, h){
     if(lift(e)) return;
     if(down){
       if(down.grabbed){ h.release && h.release(down.moved, sx, sy); }
-      else if(!down.moved && e.button === 0) h.click && h.click(sx, sy);
+      else if(!down.moved && (e.button === 0 || e.pointerType === 'touch')) h.click && h.click(down.sx, down.sy);
     }
     down = null;
   });

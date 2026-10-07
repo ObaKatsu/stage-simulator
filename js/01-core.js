@@ -1747,10 +1747,16 @@ function el(tag, props, ...kids){
 }
 function numField(lab, val, scale, onSet, step){
   const id = 'p_' + Math.random().toString(36).slice(2, 8);
-  const inp = el('input', {type:'number', id, step:step || '0.5'});
+  const inp = el('input', {type:'number', id, step:step || '0.5', inputmode:'decimal'});
   inp.value = val == null || isNaN(val) ? '' : String(Math.round(val * scale * 100) / 100);
   inp.addEventListener('change', () => { const v = parseFloat(inp.value); onSet(isNaN(v) ? null : v / scale); });
-  return el('div', null, el('label', {class:'f', for:id, text:lab}), inp);
+  // − / + steppers (shown on touch screens) for one-handed adjusting at the range
+  const st = parseFloat(step || '0.5') || 0.5, dec = (String(step || '0.5').split('.')[1] || '').length;
+  const bump = dir => { const v = parseFloat(inp.value); const n = (isNaN(v) ? 0 : v) + dir * st; inp.value = String(+n.toFixed(Math.max(dec, 0))); inp.dispatchEvent(new Event('change')); };
+  const wrap = el('div', {class:'numwrap'},
+    el('button', {type:'button', class:'stepbtn', 'aria-label':'減少', tabindex:'-1', text:'−', onclick:() => bump(-1)}), inp,
+    el('button', {type:'button', class:'stepbtn', 'aria-label':'增加', tabindex:'-1', text:'＋', onclick:() => bump(1)}));
+  return el('div', null, el('label', {class:'f', for:id, text:lab}), wrap);
 }
 function selField(lab, options, val, onSet){
   const id = 'p_' + Math.random().toString(36).slice(2, 8);
@@ -1764,12 +1770,46 @@ function row(...kids){ return el('div', {class:'row'}, ...kids); }
 function warn(t){ return el('div', {class:'msg warn', text:t}); }
 
 function kindLabel(o){ return o.type === 'plate' ? (o.shape === 'square' ? '方形 Falling Plate' : '圓形 Falling Plate') : o.type === 'popper' && o.mini ? '迷你鋼靶' : OBJ[o.type].label; }
+/* the properties of the selected object float next to the top view (a bottom sheet on phones) */
+function syncPropCard(o){
+  const box = $('propsBox'); if(!box) return;
+  if(!syncPropCard.home){ syncPropCard.home = document.createComment('propsBox'); box.parentNode.insertBefore(syncPropCard.home, box); }
+  let card = $('propCard');
+  if(!card){
+    card = el('div', {id:'propCard', class:'propcard hidden', role:'dialog', 'aria-label':'物件屬性'});
+    const hd = el('div', {class:'pc-head'}, el('b', {id:'pcTitle'}),
+      el('button', {class:'mini', id:'pcFold', title:'收合或展開', text:'收合', onclick:() => { card.classList.toggle('folded'); $('pcFold').textContent = card.classList.contains('folded') ? '展開' : '收合'; }}),
+      el('button', {class:'mini', title:'取消選取', text:'✕', onclick:() => { selId = null; renderProps(); renderViews(); }}));
+    card.appendChild(hd); card.appendChild(el('div', {class:'pc-body', id:'pcBody'}));
+    document.body.appendChild(card);
+  }
+  if(o){
+    $('pcTitle').textContent = (o.label || '') + ' ' + (OBJ[o.type] ? OBJ[o.type].label : '');
+    if(box.parentNode !== $('pcBody')) $('pcBody').appendChild(box);
+    card.classList.remove('hidden');
+    placePropCard();
+  }else{
+    card.classList.add('hidden');
+    if(box.parentNode !== syncPropCard.home.parentNode) syncPropCard.home.parentNode.insertBefore(box, syncPropCard.home.nextSibling);
+  }
+}
+// keep the card inside the top view (or the picture pane when the top view is hidden) so it never covers the results panel
+function placePropCard(){
+  const card = $('propCard'); if(!card || card.classList.contains('hidden')) return;
+  if(window.matchMedia && matchMedia('(max-width: 900px)').matches){ card.style.top = card.style.right = card.style.maxHeight = ''; return; }
+  const host = ($('topPane') && $('topPane').offsetParent) ? $('topPane') : $('imgPane'), r = host.getBoundingClientRect();
+  card.style.top = Math.round(r.top + 52) + 'px';
+  card.style.right = Math.round(window.innerWidth - r.right + 10) + 'px';
+  card.style.maxHeight = Math.max(160, Math.round(r.height - 64)) + 'px';
+}
+window.addEventListener('resize', () => placePropCard());
+if(typeof ResizeObserver !== 'undefined') window.addEventListener('DOMContentLoaded', () => { const ro = new ResizeObserver(() => placePropCard()); ['topPane', 'imgPane', 'resPanel'].forEach(id => { const e = document.getElementById(id); if(e) ro.observe(e); }); });
 function renderProps(){
   if(typeof renderVisPanel === 'function') setTimeout(renderVisPanel, 0);
   const box = $('propsBox'); box.innerHTML = '';
   const o = getObj(selId);
-  if(o && selId !== renderProps.last && document.body.dataset.mode === 'build'){ const so = $('secObj'); if(so && !so.open) so.open = true; }   // show the properties of what was just picked or placed
   renderProps.last = selId;
+  syncPropCard(o);
   if(!o){ box.appendChild(el('p', {class:'help', text:'尚未選取物件。用「選取」工具點物件即可編輯。'})); return; }
   const def = OBJ[o.type];
   const upd = (extent) => objectsChanged(extent);

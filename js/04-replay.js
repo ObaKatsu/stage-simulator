@@ -552,10 +552,37 @@ function rhythmDrill(){
   RP.playing = true; rpLastWall = 0; if(!RP.raf) RP.raf = requestAnimationFrame(replayTick); syncReplayUI();
 }
 function exitReplay(){ replayPlanOverride = null; RP.on = false; RP.playing = false; RP.pre = null; if(v3d.mode === 'follow' || v3d.mode === 'fpv') v3d.mode = 'orbit'; refresh3dModes(); syncReplayUI(); render3d(); }
+/* timeline strip under the replay controls: each shot's time split into moving / shooting / waiting; click jumps to that shot */
+const RP_TL_COL = {move:'#4A7FB0', shoot:'#3E9B55', wait:'#E0A33A'};
+function drawReplayTimeline(){
+  const cv = $('rpTL'); if(!cv || !RP.on || !RP.res) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth || 600, H = 34;
+  if(cv.width !== Math.round(W*dpr)){ cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr); }
+  const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const T = Math.max(0.1, RP.total), X = t => 6 + (W - 12) * Math.min(1, Math.max(0, t / T));
+  RP.res.shots.forEach(x => {
+    const end = shotFire(x), start = end - (x.dt - (x.flight && x.kindKey === 'stopplate' ? x.flight : 0)), p = x.parts || {};
+    let a = start; [['move', p.move || 0], ['wait', p.wait || 0], ['shoot', p.shoot || 0]].forEach(([k, v]) => { if(v <= 0) return; g.fillStyle = RP_TL_COL[k]; g.fillRect(X(a), 9, Math.max(1, X(a + v) - X(a)), 14); a += v; });
+    g.fillStyle = x.impossible ? '#C8372D' : '#1E2B38'; g.fillRect(X(end) - 0.5, 5, 1.5, 22);
+  });
+  g.fillStyle = '#C8372D'; g.fillRect(X(RP.t) - 1, 0, 2, H);
+  g.fillStyle = '#5B6773'; g.font = '10px sans-serif'; g.textAlign = 'left'; g.fillText('移動', 8, 33); g.fillStyle = RP_TL_COL.move; g.fillRect(30, 26, 8, 6);
+  g.fillStyle = '#5B6773'; g.fillText('射擊', 44, 33); g.fillStyle = RP_TL_COL.shoot; g.fillRect(66, 26, 8, 6);
+  g.fillStyle = '#5B6773'; g.fillText('等待', 80, 33); g.fillStyle = RP_TL_COL.wait; g.fillRect(102, 26, 8, 6);
+}
+function replayTimelineClick(e){
+  if(!RP.on) return;
+  const cv = $('rpTL'), r = cv.getBoundingClientRect(), W = r.width, t = Math.max(0, Math.min(1, (e.clientX - r.left - 6) / (W - 12))) * RP.total;
+  // snap to the nearest shot within 0.3 s
+  let best = null, bd = 0.3; RP.res.shots.forEach(x => { const d = Math.abs(shotFire(x) - t); if(d < bd){ bd = d; best = x; } });
+  RP.playing = false; RP.pre = null; RP.t = best ? shotFire(best) : t; RP.beeped = RP.t > 0;
+  syncReplayUI(); render3d();
+}
 function syncReplayUI(light){
   const bar = $('rpBar'); if(!bar) return;
   bar.classList.toggle('hidden', !RP.on);
   if(!RP.on) return;
+  drawReplayTimeline();
   const sl = $('rpSlider'); sl.max = RP.total.toFixed(2); sl.value = RP.t.toFixed(2);
   $('rpTime').textContent = fmt(Math.min(RP.t, RP.res.total)) + ' ／ ' + fmt(RP.res.total) + ' 秒';
   if(light) return;
@@ -568,6 +595,7 @@ function syncReplayUI(light){
 
 function bindReplay(){
   $('rpPlay').addEventListener('click', () => RP.playing ? pauseReplay() : playReplay());
+  $('rpTL').addEventListener('click', replayTimelineClick);
   $('rpSlider').addEventListener('input', e => { RP.t = +e.target.value; RP.beeped = RP.t > 0; RP.pre = null; syncReplayUI(true); render3d(); });
   $('rpSpeed').addEventListener('change', e => { RP.speed = +e.target.value; });
   $('rpSound').addEventListener('change', e => { RP.sound = e.target.checked; if(RP.sound) audio(); });

@@ -24,7 +24,8 @@ const TP_DEFAULT = {
   nsPen:0.05,
   exitT:0.15, startCost:0.30, speed:3.0, entry:{full:0.35, rolling:0.15, move:0}, moveSplitPen:0.08,
   reloadStatic:1.20, reloadMove:1.00, windowOpen:0.50, oneHandMult:1.30, tunnelSpeed:0.45,
-  climbUp:0.50, climbDown:0.40, sitDown:0.60, standUp:0.60, dismount:1.00, sitEye:0.78
+  climbUp:0.50, climbDown:0.40, sitDown:0.60, standUp:0.60, dismount:1.00, sitEye:0.78,
+  entryShootSave:0.60, exitShootSave:0.80
 };
 const HP_DEFAULT = {
   paper:[{A:90,C:9,D:1,M:0},{A:80,C:15,D:3,M:2},{A:70,C:20,D:5,M:5},{A:60,C:25,D:7,M:8}],
@@ -38,7 +39,7 @@ const TP_LABELS = [
   ['split.0','同靶 split：5 公尺內','s'],['split.1','同靶 split：5 到 8 公尺','s'],['split.2','同靶 split：8 到 10 公尺','s'],['split.3','同靶 split：10 公尺以上','s'],
   ['expPen.partial','部分遮蔽另加','s'],['expPen.heavy','嚴重遮蔽另加','s'],['steelPen','鋼靶、Falling Plate 另加','s'],['nsPen','有 no-shoot 的靶另加（精確瞄準）','s'],
   
-  ['exitT','出位時間','s'],['startCost','起步成本','s'],['speed','行進速度','m/s'],['tunnelSpeed','礦工隧道內移動速度（一般速度的倍數）','×'],['climbUp','站上講台、橋、船（估計）','s'],['climbDown','走下講台、橋、船（估計）','s'],['sitDown','坐下或跨坐上去（估計）','s'],['standUp','從座位起身（估計）','s'],['dismount','下馬（估計）','s'],['sitEye','坐姿眼睛高於座面（估計）','m'],
+  ['exitT','出位時間','s'],['startCost','起步成本','s'],['speed','行進速度','m/s'],['tunnelSpeed','礦工隧道內移動速度（一般速度的倍數）','×'],['climbUp','站上講台、橋、船（估計）','s'],['climbDown','走下講台、橋、船（估計）','s'],['sitDown','坐下或跨坐上去（估計）','s'],['standUp','從座位起身（估計）','s'],['dismount','下馬（估計）','s'],['sitEye','坐姿眼睛高於座面（估計）','m'],['entryShootSave','進入射擊省下的進位時間比例（估計）','×'],['exitShootSave','離開射擊省下的出位時間比例（估計）','×'],
   ['entry.full','進位：完全停頓','s'],['entry.rolling','進位：減速通過','s'],['entry.move','進位：移動中射擊','s'],['moveSplitPen','移動中射擊 split 另加','s'],
   ['reloadStatic','定點換匣','s'],['reloadMove','移動中換匣','s'],['windowOpen','開窗','s'],['oneHandMult','單手射擊 split 倍數','×']
 ];
@@ -128,9 +129,13 @@ function buildPlan(points, name){
   const vis = stops.map(st => { const m = {}; computeVis(stopVP(st), {coarse:true}).forEach(r => m[r.id] = r); return m; });
   const unassigned = [];
   engageable().forEach(t => {
-    let bi = -1, bq = 0;
-    stops.forEach((st, j) => { const q = qual(vis[j][t.id]); if(q > bq + 1e-9 || (q > 0 && Math.abs(q - bq) < 1e-9 && bi < 0)){ bq = q; bi = j; } });
-    if(t.type === 'stopplate'){ for(let j = stops.length - 1; j >= 0; j--) if(qual(vis[j][t.id]) > 0){ bi = j; break; } }
+    // among the stops that can engage the target, the nearest one; well-exposed (50% or more) stops come first
+    const q = j => { let v = qual(vis[j][t.id]); if(v <= 0 && mechMoves(t) && mechTimeline(t, stops[j]).any) v = 0.5; return v; };
+    const d = j => Math.hypot(stops[j].x - t.x, stops[j].y - t.y);
+    const ok = stops.map((_, j) => j).filter(j => q(j) > 0), good = ok.filter(j => q(j) >= 0.5 - 1e-9);
+    const pool = good.length ? good : ok;
+    let bi = pool.length ? pool.reduce((b, j) => (d(j) < d(b) - 1e-6 || (Math.abs(d(j) - d(b)) <= 1e-6 && q(j) > q(b))) ? j : b, pool[0]) : -1;
+    if(t.type === 'stopplate'){ for(let j = stops.length - 1; j >= 0; j--) if(q(j) > 0){ bi = j; break; } }
     if(bi < 0){ unassigned.push(t.id); return; }
     stops[bi].targets.push({id:t.id, n:t.type === 'paper' ? (t.hits || 2) : 1});
   });
@@ -254,9 +259,14 @@ function visBadge(r){
   if(r.nomStatus !== r.status && r.posture) return el('span', {class:'st post', title:'需' + r.posture, text:'需調整姿態'});
   return el('span', {class:'st ' + r.status, text:r.status === 'full' ? '全露' : '部分 ' + Math.round(r.exp * 100) + '%'});
 }
+function stopProblem(st, id){
+  const o = getObj(id), r = stopVisMemo(st)[id], pb = visProblem(r);
+  if(pb && mechMoves(o) && r && r.status !== 'unsafe' && r.status !== 'back' && mechTimeline(o, st).any) return null;   // hidden at rest but exposed while it swings / slides
+  if(!pb && mechMoves(o) && !mechTimeline(o, st).any && !mechTimeline(o, st).pre) return '擺動或滑動過程中一直被遮住';
+  return pb;
+}
 function confirmAssign(stopIdx, st, ids){
-  const vis = stopVisMemo(st);
-  const bad = ids.map(id => ({o:getObj(id), why:visProblem(vis[id])})).filter(x => x.o && x.why);
+  const bad = ids.map(id => ({o:getObj(id), why:stopProblem(st, id)})).filter(x => x.o && x.why);
   if(!bad.length) return true;
   const lines = bad.map(x => x.o.label + '：' + x.why).join('\n');
   return confirm('S' + (stopIdx + 1) + ' 無法射擊以下的靶：\n' + lines + '\n\n排進去會讓時間與得分計算失真，而且現場打不到。仍要排在 S' + (stopIdx + 1) + ' 嗎？');
@@ -290,6 +300,37 @@ function blurHd(hd, sig, w, aw){
   const a2 = Math.min(A, on), cd = hd.C + hd.D, rest = Math.max(0, on - a2);
   const C = cd > 0 ? hd.C / cd * rest : rest, D = cd > 0 ? hd.D / cd * rest : 0;
   return {A:a2, C, D, M:hd.M + (on0 - on), NS:hd.NS};
+}
+/* ---------- moving targets: when can they actually be shot from a stop? ----------
+   Swingers (physics) and sliders are posed over time; a target counts as engageable at a moment when at least
+   half of it can be shot from the stop (walls, props, no-shoots and the target's own stand all block). */
+function mechMoves(o){ return !!(o && o.mech && ((o.mech.type === 'swinger' && o.type === 'paper') || (o.mech.type === 'slider' && o.mech.ex != null))); }
+function mechPoseAt(o, rel){   // rel: seconds since activation; null = still locked / not started
+  const m = o.mech;
+  if(m.type === 'swinger' && o.type === 'paper'){ const ax = swingAxle(o), th = swingAngle(m, rel == null ? null : rel); return Object.assign({}, o, {swing:{piv:ax.piv, k:ax.k, a:-th}}); }
+  if(m.type === 'slider' && m.ex != null){ const T = Math.max(0.1, m.travel || 1), u = rel == null ? 0 : Math.max(0, Math.min(1, rel / T)); return Object.assign({}, o, {x:o.x + (m.ex - o.x)*u, y:o.y + (m.ey - o.y)*u}); }
+  return o;
+}
+const MECH_TL = new Map();
+function mechTimeline(o, st){
+  const vp = stopVP(st), key = [o.id, st.x, st.y, st.stance, JSON.stringify(stage.objects).length, JSON.stringify(o), JSON.stringify(PROFILE.postures)].join('|');
+  let tl = MECH_TL.get(key); if(tl) return tl;
+  const occ = occluders(), m = o.mech;
+  const exp = rel => { const r = computeVis(vp, {only:o.id, pose:{[o.id]:mechPoseAt(o, rel)}, coarse:true, noFlex:true, occ})[0]; return r && r.status !== 'unsafe' && r.status !== 'back' ? (r.exp || 0) : 0; };
+  const H = m.type === 'swinger' ? Math.min(20, ((swingSim(m).tSettle) || 10) + 1) : Math.max(0.1, m.travel || 1) + 0.3, dt = 0.04;
+  const iv = []; let open = null;
+  for(let t = 0; t <= H + 1e-9; t += dt){ const v = exp(t) >= 0.5; if(v && open == null) open = t; if(!v && open != null){ iv.push([open, t]); open = null; } }
+  const finalVis = open != null; if(open != null) iv.push([open, Infinity]);
+  tl = {pre:exp(null) >= 0.5, iv, finalVis, any:iv.length > 0, maxExp:0};
+  if(MECH_TL.size > 400) MECH_TL.clear(); MECH_TL.set(key, tl);
+  return tl;
+}
+// earliest time >= rel when the target can be shot (relative to activation); null if never
+function mechNextVisible(tl, rel){
+  if(rel < 0 && tl.pre) return rel;
+  const r = Math.max(0, rel);
+  for(const [a, b] of tl.iv){ if(r >= a && r < b) return r; if(a > r) return a; }
+  return null;
 }
 function planChanged(persist){ planCache = null; if(typeof refreshReplayForPlan === 'function') refreshReplayForPlan(); renderPlanPanel(); if(typeof renderResultsPanel === 'function') renderResultsPanel(); if(typeof renderResultsPanel === 'function') renderResultsPanel(); renderViews(); if(persist !== false) saveStage(); }
 
@@ -383,7 +424,9 @@ function computePlan(plan, opts){
       if(k === 0) climb += startRise();
     }
     const travel = moving ? d / vEff + tunExtra + climb : 0;
-    const moveT = moving ? (k > 0 ? T.exitT : 0) + T.startCost + travel : 0;
+    // leaving the previous stop while firing its last shots overlaps part of the exit (easy exit)
+    const pstop = k > 0 ? plan.stops[k-1] : null, exitOverlap = moving && pstop && pstop.exitShoot ? T.exitT * Math.min(1, Math.max(0, T.exitShootSave ?? 0.8)) : 0;
+    const moveT = moving ? (k > 0 ? T.exitT - exitOverlap : 0) + T.startCost + travel : 0;
     let wait = 0; const waitWhy = [];
     let stopRl = null;
     if(st.reload){
@@ -405,27 +448,37 @@ function computePlan(plan, opts){
     const postT = Math.max(0, (PROFILE.postures[stance]?.t || 0) - (!moving && prevStance === stance ? PROFILE.postures[stance]?.t || 0 : 0));
     if(postT > 0){ wait += postT; waitWhy.push(POSTURE_NAME[stance] + ' ' + fmt(postT) + ' 秒'); }
     if(st.targets.some(x => vis[x.id]?.needOpen)){ wait += T.windowOpen; waitWhy.push('開窗 ' + fmt(T.windowOpen) + ' 秒'); }
-    const entry = T.entry[st.stopType] ?? T.entry.full;
+    if(!st.targets.length) warnings.push('S' + (k+1) + ' 沒有分配到要打的靶，會白走一趟；可以刪除這個停頓點或用「找最佳路線」');
+    const entry0 = T.entry[st.stopType] ?? T.entry.full;
+    // shooting the first target while still stepping into the stop: part of the entry time is saved
+    const entryShoot = !!(st.entryShoot && moving), entry = entryShoot ? entry0 * (1 - Math.min(1, Math.max(0, T.entryShootSave ?? 0.6))) : entry0;
+    const lastTid = st.targets.length ? st.targets[st.targets.length - 1].id : null, firstTid = st.targets.length ? st.targets[0].id : null;
+    const exitShoot = !!(st.exitShoot && k < plan.stops.length - 1);
     let prevTarget = null, firstAtStop = true;
     st.targets.forEach(asg => {
       const o = getObj(asg.id); if(!o) return;
       const r = vis[o.id];
-      if(!r || r.status === 'none' || r.status === 'back'){ warnings.push('S' + (k+1) + ' 看不到 ' + o.label); }
+      const movesVis = mechMoves(o) && r && r.status !== 'back' && r.status !== 'unsafe' && mechTimeline(o, st).any;
+      if((!r || r.status === 'none' || r.status === 'back') && !movesVis && !(mechMoves(o) && r && r.status === 'none')){ warnings.push('S' + (k+1) + ' 看不到 ' + o.label); }
       if(r && r.status === 'unsafe') warnings.push('S' + (k+1) + ' 射擊 ' + o.label + ' 超出安全射擊角度（DQ）');
       let extraPost = 0;
       if(r && r.nomStatus !== r.status && r.postureTime){ extraPost = r.postureTime; }
       if(r && r.nomStatus === 'none' && r.status !== 'none' && r.posture) warnings.push('S' + (k+1) + ' 打 ' + o.label + ' 需' + r.posture);
       const dist = r ? r.dist : Math.hypot(o.x - st.x, o.y - st.y), band = distBand(dist);
-      const expRatio = r ? r.exp : 1, expo = expRatio >= 0.95 ? 'full' : expRatio >= 0.5 ? 'partial' : 'heavy';
+      const expRatio = movesVis && (!r || r.exp < 0.5) ? 0.5 : r ? r.exp : 1, expo = expRatio >= 0.95 ? 'full' : expRatio >= 0.5 ? 'partial' : 'heavy';   // a moving target is shot while at least half exposed
       const steel = o.type !== 'paper', oneHand = !!(r && r.oneHand);
       const hasNS = stage.objects.some(n => n.type === 'noshoot' && n.cover === o.id);
       let sp = T.split[band] + (T.expPen[expo] || 0) + (steel ? T.steelPen : 0) + (st.stopType === 'move' ? T.moveSplitPen : 0) + (hasNS ? (T.nsPen || 0) : 0);
       if(oneHand) sp *= T.oneHandMult;
 
-      const hd0 = steel ? null : hitDist(band, expo, st.stopType, oneHand, hasNS), pS = steel ? steelP(band, st.stopType) : null;
+      // shots fired while entering or leaving count as rolling shots (accuracy and split)
+      const onMove = (entryShoot && o.id === firstTid) || (exitShoot && o.id === lastTid && st.targets.length > 1) || (exitShoot && st.targets.length === 1);
+      const stEff = onMove && st.stopType === 'full' ? 'rolling' : st.stopType;
+      const hd0 = steel ? null : hitDist(band, expo, stEff, oneHand, hasNS), pS = steel ? steelP(band, stEff) : null;
       const flight = bbFlight(dist);
       for(let s = 0; s < asg.n; s++){
-        let hd = hd0, lead = null;
+        let hd = hd0, lead = null, impossible = false;
+        const moveNote = onMove ? (entryShoot && o.id === firstTid ? '進入時開槍' : '邊打邊離開') : '';
         let dt, kind, parts = {shoot:0, move:0, wait:0}, why = '';
         let emptyReload = 0;
         if(mag <= 0){ emptyReload = T.reloadStatic; mag = load; reloads++; reloadLog.push({stop:k, shot:idx, extra:T.reloadStatic, moving:false, forced:true}); if(rmode === 'manual') warnings.push('第 ' + (idx+1) + ' 槍前彈匣已空（每匣 ' + load + ' 發），模型自動加入定點換匣 ' + fmt(T.reloadStatic) + ' 秒；可把換匣安排改成「自動」，讓換匣排在移動中'); }
@@ -447,8 +500,24 @@ function computePlan(plan, opts){
         }else{ dt = sp; parts.shoot = sp; kind = '同靶'; }
         if(emptyReload){ dt += emptyReload; parts.wait += emptyReload; why = '彈匣打空，定點換匣'; }
         mag--;
-        // moving targets: wait for the visible window
-        if(isMech(o) && s === 0){
+        // moving targets (swinger, slider): shoot only while the target is actually exposed from this stop
+        if(mechMoves(o)){
+          const m = o.mech; let A = 0;
+          if(m.act.mode === 'object'){ const at = hitTime[m.act.id]; A = at != null ? at + (m.act.delay || 0) : null; if(A == null && s === 0) warnings.push(o.label + ' 的啟動來源尚未在它之前射擊'); }
+          else if(m.act.mode === 'none') A = null;
+          const tl = mechTimeline(o, st);
+          if(A == null){ if(!tl.pre){ impossible = true; } }
+          else {
+            const rel = t + dt + flight - A, nv = mechNextVisible(tl, rel);
+            if(nv == null) impossible = true;
+            else if(nv > rel + 1e-6){ const w = nv - rel; dt += w; parts.wait += w; why = (why ? why + '；' : '') + '等 ' + o.label + ' 擺到看得到的位置 ' + fmt(w) + ' 秒'; }
+          }
+          const prevSame = shots.length && shots[shots.length - 1].target === o.id ? shots[shots.length - 1] : null;
+          if(impossible && s > 0 && !(prevSame && prevSame.impossible)) warnings.push('S' + (k+1) + ' 打 ' + o.label + ' 的第 ' + (s+1) + ' 發來不及：靶已擺回或滑到被遮住的位置，以脫靶計（可減少發數或調整射擊順序）');
+          if(impossible && s === 0) warnings.push('S' + (k+1) + ' 打不到 ' + o.label + '：' + (A == null && m.act.mode === 'none' ? '機關沒有設定啟動方式，靜止位置又被遮住' : '擺動或滑動過程中一直被遮住') + '，這 ' + asg.n + ' 發以脫靶計');
+        }
+        // window-based moving targets (monkey, disappearing...): wait for the visible window
+        else if(isMech(o) && s === 0){
           const m = o.mech; let A = 0;
           if(m.act.mode === 'object'){ const at = hitTime[m.act.id]; A = at != null ? at + (m.act.delay || 0) : null; if(A == null) warnings.push(o.label + ' 的啟動來源尚未在它之前射擊'); }
           if(A != null){
@@ -467,6 +536,8 @@ function computePlan(plan, opts){
             if(v > 0.05){ hd = blurHd(hd0, sig, targetSpec(o.size).w / 2, AZONE_HALF * targetSpec(o.size).w / 0.30); lead = {v, need, sig}; why = (why ? why + '；' : '') + o.label + ' 擺動中，需提前約 ' + Math.round(need * 100) + ' 公分'; }
           }
         }
+        if(impossible && !steel) hd = {A:0, C:0, D:0, M:1, NS:0};
+        if(moveNote && s === 0) why = (why ? why + '；' : '') + moveNote;
         const ov = plan.overrides && plan.overrides[idx];
         if(ov != null){ const sc = ov / (dt || 1); parts.shoot *= sc; parts.move *= sc; parts.wait *= sc; dt = ov; }
         t += dt; sumShoot += parts.shoot; sumMove += parts.move; sumWait += parts.wait;
@@ -474,7 +545,7 @@ function computePlan(plan, opts){
         const ep = !scored ? 0 : steel ? 5*pS - 10*(1 - pS) : 5*hd.A + 3*hd.C + hd.D - 10*hd.M - 10*hd.NS;
         let rlAt = emptyReload > 0, rlT = emptyReload;
         if(stopRl && !stopRl.used){ stopRl.used = true; rlAt = true; rlT += stopRl.extra; }
-        shots.push({i:idx, stop:k, target:o.id, label:o.label, kind, dt, t, parts, reloadT:rlT, reloadAt:rlAt, why:why || (parts.wait > 0.001 && firstAtStop === false && s === 0 && waitWhy.length ? waitWhy.join('、') : ''), ep, hd, pS, steel, scored, band, expo, overridden:ov != null, flight, fire:t, lead, dist, magLeft:mag, sp, kindKey:o.type});
+        shots.push({i:idx, stop:k, target:o.id, label:o.label, kind, dt, t, parts, reloadT:rlT, reloadAt:rlAt, why:why || (parts.wait > 0.001 && firstAtStop === false && s === 0 && waitWhy.length ? waitWhy.join('、') : ''), ep, hd, pS, steel, scored, band, expo, overridden:ov != null, flight, fire:t, lead, dist, magLeft:mag, sp, kindKey:o.type, impossible});
         shotTime[o.id] = t; hitTime[o.id] = t + flight; prevTarget = o.id; idx++;
       }
       // first shot row carries the reasons for waiting at this stop
@@ -669,8 +740,9 @@ function renderPlanPanel(){
   }
   box.appendChild(head);
   if(vpPick) renderVpPicker(box);
+  if(typeof renderOptBox === 'function') renderOptBox(box);
   if(!plan){
-    box.appendChild(el('p', {class:'help', text:'尚無路線計畫。可由視點（依編號為停頓順序）或停頓點建議自動建立，再調整。'}));
+    box.appendChild(el('p', {class:'help', text:'尚無路線計畫。可由視點（依編號為停頓順序）或停頓點建議自動建立，或用上方「找最佳路線」，再調整。'}));
     [rpS, rpT, rpV, rpC].forEach(x => x && x.appendChild(el('p', {class:'help', text:'尚無路線計畫。請在左側「路線計畫與換匣」建立。'})));
     return;
   }
@@ -700,10 +772,15 @@ function renderPlanPanel(){
   // --- editor ---
   plan.stops.forEach((st, k) => {
     const d = el('div', {class:'port'});
-    d.appendChild(el('div', {class:'kind', text:'停頓點 S' + (k+1) + '（' + fmt(st.x, 1) + ', ' + fmt(st.y, 1) + '）'}));
+    d.appendChild(el('div', {class:'kind', text:'停頓點 S' + (k+1) + '（' + fmt(st.x, 1) + ', ' + fmt(st.y, 1) + '）' + (st.locked ? '　🔒 已鎖定節點' : '')}));
     d.appendChild(row(
       selField('停頓類型', [['full','完全停頓'],['rolling','減速通過'],['move','移動中射擊']], st.stopType, v => { st.stopType = v; planChanged(); }),
       selField('姿勢', STANCE_OPTS(), st.stance || 'stand', v => { st.stance = v; planChanged(); })));
+    d.appendChild(el('div', {class:'chkrow'},
+      chk('進入時開槍（第一個靶）', !!st.entryShoot, v => { st.entryShoot = v; planChanged(); }),
+      chk('邊打邊離開（最後一個靶）', !!st.exitShoot, v => { st.exitShoot = v; planChanged(); }),
+      chk('鎖定節點', !!st.locked, v => { st.locked = v; planChanged(); })));
+    if(k === 0 && st.entryShoot && (() => { const so = stage.objects.find(o => o.type === 'start'); return !so || Math.hypot(st.x - so.x, st.y - so.y) < 0.3; })()) d.appendChild(el('p', {class:'help', text:'起始位置就是這個停頓點，沒有進入的移動，「進入時開槍」不會有作用。'}));
     if(rm === 'manual') d.appendChild(chk('到這個停頓點前換匣', st.reload, v => { st.reload = v; planChanged(); }));
     R.reloadLog.filter(r => r.stop === k).forEach(r => { const w = el('div', {class:'readout', text:'換匣：' + (r.forced ? '' : '到這個停頓點前，') + reloadText(r)}); w.style.color = 'var(--warn)'; d.appendChild(w); });
     const picking = pendingOrder && pendingOrder.stopId === st.id;
@@ -715,25 +792,25 @@ function renderPlanPanel(){
     if(picking) d.appendChild(el('p', {class:'help', text:'在俯視圖或 3D 以外的原圖上依序點靶。點到已在其他停頓點的靶會移到這裡；未點到的靶保持原順序排在後面。按 Esc 取消。'}));
     const ul = el('ul', {class:'summ tlist'}); ul.dataset.stop = String(k);
     const svis = stopVisMemo(st);
-    const badHere = st.targets.filter(x => visProblem(svis[x.id]));
-    if(badHere.length) d.appendChild(warn('S' + (k+1) + ' 打不到：' + badHere.map(x => (getObj(x.id)?.label || '?') + '（' + visProblem(svis[x.id]) + '）').join('、') + '。請移到看得到的停頓點，或移動這個停頓點。'));
+    const badHere = st.targets.filter(x => stopProblem(st, x.id));
+    if(badHere.length) d.appendChild(warn('S' + (k+1) + ' 打不到：' + badHere.map(x => (getObj(x.id)?.label || '?') + '（' + stopProblem(st, x.id) + '）').join('、') + '。請移到看得到的停頓點，或移動這個停頓點。'));
     st.targets.forEach((asg, j) => {
       const o = getObj(asg.id);
-      const li = el('li', {class:visProblem(svis[asg.id]) ? 'bad' : ''});
+      const li = el('li', {class:stopProblem(st, asg.id) ? 'bad' : ''});
       li.dataset.stop = String(k); li.dataset.idx = String(j);
       const hd = el('span', {class:'draghandle', title:'按住拖曳：調整射擊順序，或拖到其他停頓點', 'aria-label':'拖曳調整順序', text:'⠿'});
       hd.addEventListener('pointerdown', e => planDragStart(e, plan, k, j, li));
       li.appendChild(hd);
       li.appendChild(el('span', {class:'ord', text:String(j + 1)}));
       li.appendChild(el('b', {text:(o ? o.label : '?') + ' '}));
-      li.appendChild(visBadge(svis[asg.id]));
+      li.appendChild(mechMoves(o) && !stopProblem(st, asg.id) && visProblem(svis[asg.id]) ? el('span', {class:'st post', title:'靜止位置被遮住，擺動或滑動到看得到的位置時才射擊', text:'擺動中可見'}) : visBadge(svis[asg.id]));
       const n = el('input', {type:'number', min:'1', step:'1', 'aria-label':'發數'}); n.value = asg.n; n.style.width = '52px';
       n.addEventListener('change', () => { asg.n = Math.max(1, Math.round(+n.value || 1)); planChanged(); });
       li.appendChild(n); li.appendChild(document.createTextNode(' 發 '));
       li.appendChild(el('button', {text:'↑', title:'往前', onclick:() => { if(j > 0){ [st.targets[j-1], st.targets[j]] = [st.targets[j], st.targets[j-1]]; planChanged(); } }}));
       li.appendChild(el('button', {text:'↓', title:'往後', onclick:() => { if(j < st.targets.length - 1){ [st.targets[j+1], st.targets[j]] = [st.targets[j], st.targets[j+1]]; planChanged(); } }}));
       const mv = el('select', {'aria-label':'移到其他停頓點'}); mv.style.width = 'auto';
-      plan.stops.forEach((s2, m) => { const pb = m === k ? null : visProblem(stopVisMemo(s2)[asg.id]); mv.appendChild(el('option', {value:String(m), text:'S' + (m+1) + (pb ? '（打不到）' : '')})); });
+      plan.stops.forEach((s2, m) => { const pb = m === k ? null : stopProblem(s2, asg.id); mv.appendChild(el('option', {value:String(m), text:'S' + (m+1) + (pb ? '（打不到）' : '')})); });
       mv.value = String(k); mv.addEventListener('change', () => {
         const m = +mv.value;
         if(!confirmAssign(m, plan.stops[m], [asg.id])){ mv.value = String(k); return; }
@@ -748,7 +825,7 @@ function renderPlanPanel(){
     const free = engageable().filter(o => !assigned.has(o.id));
     if(free.length){
       const add = el('select', {'aria-label':'加入靶'}); add.style.width = 'auto';
-      add.appendChild(el('option', {value:'', text:'加入靶…'})); free.forEach(o => add.appendChild(el('option', {value:o.id, text:o.label + (visProblem(svis[o.id]) ? '（打不到）' : '')})));
+      add.appendChild(el('option', {value:'', text:'加入靶…'})); free.forEach(o => add.appendChild(el('option', {value:o.id, text:o.label + (stopProblem(st, o.id) ? '（打不到）' : '')})));
       add.addEventListener('change', () => {
         const o = getObj(add.value); if(!o) return;
         if(!confirmAssign(k, st, [o.id])){ add.value = ''; return; }
@@ -768,6 +845,9 @@ function renderPlanPanel(){
   res.appendChild(el('div', {class:'readout', text:divInfo(R.division).name + ' 組別，每匣 ' + R.load + ' 發' + (stage.startCond.ready === 'loaded' ? '，CON1 起始頂膛共 ' + (R.load + 1) + ' 發' : '，' + {emptyChamber:'CON2', unloaded:'CON3'}[stage.startCond.ready] + ' 起始') + '，換匣 ' + R.reloads + ' 次'}));
   res.appendChild(el('div', {class:'readout', text:'總時間 ' + fmt(R.total) + ' 秒；停頓 ' + R.stops + ' 次（完全停頓 ' + R.full + '、減速通過 ' + R.rolling + '）'}));
   res.appendChild(el('div', {class:'readout', text:'期望得分 ' + fmt(R.ePts, 1) + ' ／ ' + R.maxPts + ' 分；期望 hit factor ' + fmt(R.eHF, 3)}));
+  // what a point is worth in time on this stage (ΔT = ΔP / HF): guides make-up shots and accuracy-vs-speed choices
+  if(R.eHF > 0.5){ const h = R.eHF, sec = pt => fmt(pt / h, 2);
+    res.appendChild(el('div', {class:'readout', text:'以 HF ' + fmt(h, 2) + ' 換算：1 分約等於 ' + sec(1) + ' 秒；打到 C（少 2 分）約 ' + sec(2) + ' 秒、D（少 4 分）約 ' + sec(4) + ' 秒、脫靶（少 15 分）約 ' + sec(15) + ' 秒。補槍只有在花的時間少於這些秒數時才划算（例如確定脫靶就補，C 通常不補）。'})); }
   res.appendChild(el('div', {class:'readout', text:'模擬 hit factor：中位數 ' + fmt(R.p50, 3) + '，最差一成 ' + fmt(R.p10, 3)}));
   res.appendChild(el('div', {class:'readout', text:'時間分配：射擊 ' + fmt(R.sumShoot) + ' 秒、移動 ' + fmt(R.sumMove) + ' 秒、等待（死時間）' + fmt(R.sumWait) + ' 秒'}));
   R.warnings.forEach(w => res.appendChild(warn(w)));
@@ -834,7 +914,7 @@ function finishOrderPick(){
   const incoming = po.list.filter(id => !st.targets.some(x => x.id === id));
   if(!confirmAssign(sIdx, st, incoming)){
     const vis = stopVisMemo(st);
-    po.list = po.list.filter(id => !incoming.includes(id) || !visProblem(vis[id]));   // leave the targets it cannot shoot where they were
+    po.list = po.list.filter(id => !incoming.includes(id) || !stopProblem(st, id));   // leave the targets it cannot shoot where they were
   }
   const picked = [];
   po.list.forEach(id => {

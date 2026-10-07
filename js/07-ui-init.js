@@ -27,6 +27,16 @@ function renderResStrip(){
     if(!plan){ s.appendChild(el('span', {class:'k', text:'尚無路線計畫'})); return; }
     const R = planResult(plan);
     kv('計畫', plan.name); sep(); kv('期望 HF', fmt(R.eHF, 3)); kv('時間', fmt(R.total) + ' 秒'); kv('得分', fmt(R.ePts, 1) + '／' + R.maxPts);
+    // what the last edit did: time and HF against the result before it (same plan)
+    const H = renderResStrip.hist = renderResStrip.hist || {};
+    const cur = {t:R.total, hf:R.eHF, sig:R.total.toFixed(4) + '|' + R.eHF.toFixed(4)};
+    if(H.id !== plan.id){ H.id = plan.id; H.cur = cur; H.prev = null; }
+    else if(H.cur.sig !== cur.sig){ H.prev = H.cur; H.cur = cur; }
+    if(H.prev){
+      const dt = cur.t - H.prev.t, dh = cur.hf - H.prev.hf, good = dh > 1e-4;
+      s.appendChild(el('span', {class:'delta ' + (good ? 'up' : dh < -1e-4 ? 'down' : ''), title:'和上一次修改前比較',
+        text:'上次修改：時間 ' + (dt >= 0 ? '+' : '−') + fmt(Math.abs(dt)) + ' 秒、HF ' + (dh >= 0 ? '+' : '−') + fmt(Math.abs(dh), 3)}));
+    }
     if(typeof runMonteCarlo === 'function'){
       const key = mcSig(plan, Object.assign({}, mcOpts(), {n:2000}));
       if(!renderResStrip.mc || renderResStrip.mc.sig !== key) renderResStrip.mc = runMonteCarlo(plan, {n:2000});
@@ -192,7 +202,7 @@ function updateActBar(){
   if(draft){ bar.appendChild(el('span', {text:'繪製中：' + draft.pts.length + ' 點'})); add('完成', () => finishDraft(), 'primary'); add('取消', () => { draft = null; renderViews(); }); }
   else if(pendingOrder){ bar.appendChild(el('span', {text:'依序點靶中（' + pendingOrder.list.length + '）'})); add('完成', () => finishOrderPick(), 'primary'); add('另存新計畫', () => saveAsNewPlan()); add('取消', () => { pendingOrder = null; renderPlanPanel(); renderViews(); }); }
   else if(pendingFace || pendingSlide){ bar.appendChild(el('span', {text:pendingFace ? '點一下設定面向' : '點一下設定終點'})); add('取消', () => { pendingFace = null; pendingSlide = null; setTool(tool); renderProps(); renderViews(); }); }
-  else if(selId && getObj(selId)){ const o = getObj(selId); bar.appendChild(el('span', {text:'已選取 ' + (o.label || OBJ[o.type].label)})); add('刪除', () => deleteSel(), 'danger'); add('取消選取', () => { selId = null; renderProps(); renderViews(); }); if(isMobile()) add('編輯屬性', () => { setMPane('input'); const d = $('secObj'); if(d){ d.open = true; setTimeout(() => d.scrollIntoView({block:'start'}), 50); } }); }
+  else if(selId && getObj(selId)){ const o = getObj(selId); bar.appendChild(el('span', {text:'已選取 ' + (o.label || OBJ[o.type].label)})); add('刪除', () => deleteSel(), 'danger'); add('取消選取', () => { selId = null; renderProps(); renderViews(); }); if(isMobile()) add('編輯屬性', () => { const c = $('propCard'); if(c){ c.classList.remove('folded', 'hidden'); const f = $('pcFold'); if(f) f.textContent = '收合'; } }); }
   bar.classList.toggle('hidden', !bar.children.length);
 }
 function initMobile(){

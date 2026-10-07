@@ -317,12 +317,15 @@ let visCacheKey = '', visCache = null;
 function computeVis(vp, opts){
   opts = opts || {};
   const key = vp.id + '|' + [vp.x, vp.y, vp.rot, vp.stance, vp.eyeH].join(',') + '|' + JSON.stringify(stage.objects) + JSON.stringify(PROFILE) + JSON.stringify(stage.safety) + stage.plateCy + stage.flex;
-  if(!opts.coarse && key === visCacheKey && visCache) return visCache;
-  const occ = occluders(), E0 = [vp.x, vp.y, eyeOf(vp)], P = postures(vp);
+  const one = !!(opts.only || opts.pose);   // a single target, possibly in a moved pose (moving targets over time)
+  if(!opts.coarse && !one && key === visCacheKey && visCache) return visCache;
+  const occ = opts.occ || occluders(), E0 = [vp.x, vp.y, eyeOf(vp)], P = opts.noFlex ? postures(vp).slice(0, 1) : postures(vp);
   const d = downDir(), da = Math.atan2(d[1], d[0]), sf = stage.safety;
   const res = [];
-  stage.objects.forEach(o => {
-    if(!['paper','popper','plate','stopplate'].includes(o.type)) return;
+  stage.objects.forEach(o0 => {
+    if(!['paper','popper','plate','stopplate'].includes(o0.type)) return;
+    if(opts.only && o0.id !== opts.only) return;
+    const o = opts.pose && opts.pose[o0.id] ? opts.pose[o0.id] : o0;
     const dist = Math.hypot(o.x - vp.x, o.y - vp.y);
     const bearing = normDeg(deg(da - Math.atan2(o.y - vp.y, o.x - vp.x)));   // + = right of downrange
     const r = {id:o.id, label:o.label, type:o.type, dist, bearing, notes:[]};
@@ -342,8 +345,8 @@ function computeVis(vp, opts){
       if(g.f[0]*(vp.x - o.x) + g.f[1]*(vp.y - o.y) <= 0){
         r.status = r.nomStatus = unsafe ? 'unsafe' : 'back'; r.exp = 0; r.aExp = 0; r.notes.push('在靶的背面'); if(unsafe) r.notes.unshift(unsafeNote); res.push(r); return;
       }
-      const nss = stage.objects.filter(n => n.type === 'noshoot' && (n.cover === o.id || (Math.hypot(n.x - o.x, n.y - o.y) < 0.35 && !n.cover)));
-      const nsOff = nss.map(n => [((n.x - o.x)*g.p[0] + (n.y - o.y)*g.p[1]) * 100, -(n.dz || 0) * 100]);
+      const nss = stage.objects.filter(n => n.type === 'noshoot' && (n.cover === o.id || (Math.hypot(n.x - o0.x, n.y - o0.y) < 0.35 && !n.cover)));
+      const nsOff = nss.map(n => [((n.x - o0.x)*g.p[0] + (n.y - o0.y)*g.p[1]) * 100, -(n.dz || 0) * 100]);
       const sv = opts.coarse ? 6.5 : 3.2, su = opts.coarse ? 6 : 2.8;
       for(let v = 1.5; v < g.H; v += sv) for(let u = 1.5; u < g.W; u += su){
         if(!inPolyUV(u, v, g.oct)) continue;
@@ -378,12 +381,12 @@ function computeVis(vp, opts){
     if(bl.length) r.blockers = bl;
     if(r.status === 'none' && r.blockers && r.seen > 0.05) r.notes.push('看得到但不能射擊（穿過可看穿的檔牆）');
     Object.values(best.viaWin).forEach(wn => { r.notes.push('透過 ' + wn.label + ' 的窗戶射擊' + (wn.holdOpen ? '，需先開窗並單手維持開窗' : wn.needOpen ? '，需先開窗' : '')); if(wn.holdOpen) r.oneHand = true; if(wn.needOpen) r.needOpen = true; });
-    if(isMech(o)) r.notes.push('機關靶，以靜止位置計算' + (o.mech.preVisible ? '' : '；啟動前被遮住'));
+    if(isMech(o) && !one) r.notes.push(mechMoves(o) ? '機關靶：圖上狀態為靜止位置；路線計畫依擺動或滑動過程中實際看得到的時段射擊' : '機關靶，以靜止位置計算' + (o.mech.preVisible ? '' : '；啟動前被遮住'));
     if(unsafe){ r.unsafe = true; r.status = 'unsafe'; r.nomStatus = 'unsafe'; r.notes.unshift(unsafeNote); }
     res.push(r);
   });
   res.sort((a, b) => String(a.label).localeCompare(String(b.label), 'zh-Hant', {numeric:true}));
-  if(!opts.coarse){ visCacheKey = key; visCache = res; }
+  if(!opts.coarse && !one){ visCacheKey = key; visCache = res; }
   return res;
 }
 const ST_TXT = {full:'全露', part:'部分', none:'看不到', back:'背面', unsafe:'DQ 角度'};

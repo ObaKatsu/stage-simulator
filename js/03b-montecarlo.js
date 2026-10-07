@@ -74,7 +74,7 @@ function runMonteCarlo(plan, o){
   return {plan, N, R, opts:o, hfs, sig:mcSig(plan, o),
     time:{mean:mT, p10:pct(sT, 0.1), p50:pct(sT, 0.5), p90:pct(sT, 0.9)},
     pts:{mean:mP, p10:pct(sP, 0.1), p50:pct(sP, 0.5), p90:pct(sP, 0.9), max:R.maxPts},
-    hf:{mean:mHF, sd:sHF, se:sHF / Math.sqrt(N), p5:pct(sH, 0.05), p10:pct(sH, 0.1), p50:pct(sH, 0.5), p90:pct(sH, 0.9), min:sH[0], max:sH[N - 1]},
+    hf:{mean:mHF, sd:sHF, se:sHF / Math.sqrt(N), p5:pct(sH, 0.05), p10:pct(sH, 0.1), p25:pct(sH, 0.25), p50:pct(sH, 0.5), p90:pct(sH, 0.9), min:sH[0], max:sH[N - 1]},
     pMiss:anyMiss / N, pNS:anyNS / N, pSteelDown:steelDown / N, makeups:makeups / N, pExtraRl:extraRl / N, spMiss:spMiss / N,
     pBelow:below / N, hasSteel:steelTargets.size > 0, ePE:tunPE / N, pPE:anyPE / N, hasTunnel:(R.tunnelRisk || []).some(r => r.n > 0)};
 }

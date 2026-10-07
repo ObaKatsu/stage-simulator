@@ -253,6 +253,7 @@
       <select id="rpCmp" aria-label="同時比較的路線"><option value="">不比較其他路線</option></select>
       <button id="rpRhythm">節奏練習</button>
       <button id="rpExit">結束回放</button>
+      <div class="tlwrap"><canvas id="rpTL" aria-label="逐槍時間軸：點一下跳到那一槍"></canvas></div>
     </div>
     <div class="cwrap hidden" id="v3dWrap"><canvas id="v3dGL" aria-hidden="true"></canvas><canvas id="v3dCanvas"></canvas></div>
     <div class="pane-foot readout" id="imgReadout"></div>
@@ -312,6 +313,7 @@
 <script src="js/02c-three.js"></script>
 <script src="js/03-model-plan.js"></script>
 <script src="js/03b-montecarlo.js"></script>
+<script src="js/03c-optimize.js"></script>
 <script src="js/04-replay.js"></script>
 <script src="js/05-review.js"></script>
 <script src="js/06-video.js"></script>

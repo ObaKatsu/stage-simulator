@@ -196,7 +196,7 @@ function paperGeom(o){
   return {f, p, top, bottom:top - spec.h, est, W, H:37.5*sy, oct, az, toW};
 }
 function occluders(){
-  const out = []; out.windows = [];
+  const out = [], wallsIn = []; out.windows = [];
   const addRect = (a, b, z0, z1, o, see, soft) => out.push({a, b, z0, z1, see, soft, label:o.label});
   stage.objects.forEach(o => {
     if(o.type === 'wall'){
@@ -215,6 +215,7 @@ function occluders(){
         cur = Math.max(cur, s1);
       });
       if(cur < L) addRect(P(cur), P(L), 0, zTop, o, !!o.seeThrough, !!o.soft);
+      wallsIn.push({o, zTop});
     }else if(o.type === 'platform' || (o.type === 'bridge' && o.x1 != null)){
       const c = perchFootprint(o), h = o.h || 0.4; for(let i = 0; i < 4; i++) addRect(c[i], c[(i+1)%4], 0, h, o, false, false);
     }else if(o.type === 'boat'){
@@ -232,7 +233,21 @@ function occluders(){
       addRect([o.x - p[0]*w/2, o.y - p[1]*w/2], [o.x + p[0]*w/2, o.y + p[1]*w/2], 0, o.h || 1.8, o, false, false);
     }
   });
+  // close small gaps where hand-drawn walls almost meet (in the 3D view and on site they touch; a 2D line
+  // a few centimetres short would otherwise let sight lines slip through the joint)
+  wallsIn.forEach(A => [[A.o.x1, A.o.y1], [A.o.x2, A.o.y2]].forEach(e => {
+    wallsIn.forEach(B => {
+      if(B === A) return;
+      const q = closestOnSeg(e[0], e[1], B.o.x1, B.o.y1, B.o.x2, B.o.y2), d = Math.hypot(q[0] - e[0], q[1] - e[1]);
+      if(d > 1e-4 && d <= WALL_GAP) addRect(e, q, 0, Math.min(A.zTop, B.zTop), A.o, !!(A.o.seeThrough && B.o.seeThrough), !!(A.o.soft && B.o.soft));
+    });
+  }));
   return out;
+}
+const WALL_GAP = 0.12;   // wall ends closer than this to another wall are treated as joined
+function closestOnSeg(px, py, ax, ay, bx, by){
+  const dx = bx - ax, dy = by - ay, L2 = dx*dx + dy*dy; if(L2 < 1e-12) return [ax, ay];
+  const u = Math.max(0, Math.min(1, ((px - ax)*dx + (py - ay)*dy) / L2)); return [ax + dx*u, ay + dy*u];
 }
 function rayBlock(E, S, occ, mode){
   const rx = S[0] - E[0], ry = S[1] - E[1];
@@ -314,12 +329,16 @@ function setHidden(o, vpId, on){
   if(list.length) o.hideFrom = list; else delete o.hideFrom;
 }
 let visCacheKey = '', visCache = null;
+// the head needs room: check the lean out to 10 cm beyond the eye
+function leanReach(vp, q){ const k = 1 + 0.1 / Math.abs(q.lat); return [vp.x + (q.E[0] - vp.x)*k, vp.y + (q.E[1] - vp.y)*k, q.E[2]]; }
 function computeVis(vp, opts){
   opts = opts || {};
   const key = vp.id + '|' + [vp.x, vp.y, vp.rot, vp.stance, vp.eyeH].join(',') + '|' + JSON.stringify(stage.objects) + JSON.stringify(PROFILE) + JSON.stringify(stage.safety) + stage.plateCy + stage.flex;
   const one = !!(opts.only || opts.pose);   // a single target, possibly in a moved pose (moving targets over time)
   if(!opts.coarse && !one && key === visCacheKey && visCache) return visCache;
-  const occ = opts.occ || occluders(), E0 = [vp.x, vp.y, eyeOf(vp)], P = opts.noFlex ? postures(vp).slice(0, 1) : postures(vp);
+  const occ = opts.occ || occluders(), E0 = [vp.x, vp.y, eyeOf(vp)];
+  // a lean cannot put the eye through a wall: drop postures whose head would pass a wall on the way out
+  const P = (opts.noFlex ? postures(vp).slice(0, 1) : postures(vp)).filter((q, i) => i === 0 || !q.lat || !rayBlock([vp.x, vp.y, q.E[2]], leanReach(vp, q), occ, 'body'));
   const d = downDir(), da = Math.atan2(d[1], d[0]), sf = stage.safety;
   const res = [];
   stage.objects.forEach(o0 => {
@@ -373,7 +392,7 @@ function computeVis(vp, opts){
     if(bestP !== P[0]){
       const changed = bestP.key !== P[0].key;
       const txt = (changed ? '改為' + POSTURE_NAME[bestP.key] : '') + (bestP.tag ? (changed ? '並' : '') + bestP.tag : '');
-      r.posture = txt; r.postureKey = bestP.key; r.postureTime = bestP.dt;
+      r.posture = txt; r.postureKey = bestP.key; r.postureTime = bestP.dt; r.lean = bestP.lat || 0;
       const est = changed && PROFILE.postures[bestP.key].est ? '，估計值' : '';
       r.notes.push('需' + txt + (changed ? '（姿態轉換約 +' + fmt(bestP.dt, 1) + ' 秒' + est + '）' : '') + '（原姿勢可射擊 ' + Math.round(nominal.exp*100) + '%）');
     }
@@ -516,7 +535,8 @@ function drawVisOverlay(ctx, toS){
 }
 
 /* ---------- phase 2: 3D view ---------- */
-const v3d = {mode:'orbit', yaw:-Math.PI/2 - 0.5, pitch:0.75, dist:18, tx:5, ty:6, fov:60, eyeYaw:0, eyePitch:-0.05, eyeFov:70, w:0, h:0};
+const v3d = {mode:'orbit', yaw:-Math.PI/2 - 0.5, pitch:0.75, dist:18, tx:5, ty:6, fov:60, eyeYaw:0, eyePitch:-0.05, eyeFov:70, w:0, h:0,
+  free:null, lastCam:null};   // free: {x, y, z, yaw, pitch} of the free-moving (fly) camera
 const v3dCanvas = $('v3dCanvas'), v3dCtx = v3dCanvas.getContext('2d');
 let leftTab = 'img';
 function resize3d(){
@@ -534,7 +554,7 @@ function setLeftTab(t){
   $('imgWrap').classList.toggle('hidden', t !== 'img'); $('v3dWrap').classList.toggle('hidden', t !== '3d');
   $('fitImg').classList.toggle('hidden', t !== 'img'); $('v3dBar').classList.toggle('hidden', t !== '3d');
   const touch = window.matchMedia && matchMedia('(pointer:coarse)').matches;
-  $('leftHint').textContent = t === '3d' ? (v3d.mode === 'orbit' ? (touch ? '單指拖曳旋轉　雙指縮放與平移' : '拖曳旋轉　滾輪縮放　Shift＋拖曳或右鍵拖曳平移') : (touch ? '單指拖曳轉動視線　雙指調整視角寬度' : '拖曳轉動視線　滾輪調整視角寬度')) : (touch ? '雙指縮放　拖曳空白處平移' : '滾輪縮放　拖曳空白處平移');
+  $('leftHint').textContent = t === '3d' ? (v3d.mode === 'free' ? (touch ? '單指拖曳轉動視線　雙指縮放前進後退、平移　右下按鈕移動與升降' : '拖曳轉動視線　W A S D 或方向鍵移動　Q／E 降低／升高　Shift 加速　滾輪前進後退') : v3d.mode === 'orbit' ? (touch ? '單指拖曳旋轉　雙指縮放與平移' : '拖曳旋轉　滾輪縮放　Shift＋拖曳或右鍵拖曳平移') : (touch ? '單指拖曳轉動視線　雙指調整視角寬度' : '拖曳轉動視線　滾輪調整視角寬度')) : (touch ? '雙指縮放　拖曳空白處平移' : '滾輪縮放　拖曳空白處平移');
   if(typeof flashHint === 'function') flashHint();
   if(t === '3d'){ refresh3dModes(); if(!orbitInit){ const r = v3dCanvas.parentElement.getBoundingClientRect(); if(r.width > 0){ v3d.w = r.width; v3d.h = r.height; } } resetOrbit(false); render3d(); }
 }
@@ -542,10 +562,12 @@ function refresh3dModes(){
   const sel = $('v3dMode'), cur = v3d.mode;
   sel.innerHTML = '';
   sel.appendChild(el('option', {value:'orbit', text:'環繞視角'}));
+  sel.appendChild(el('option', {value:'free', text:'自由移動'}));
   if(RP.on){ sel.appendChild(el('option', {value:'follow', text:'跟隨射手'})); sel.appendChild(el('option', {value:'fpv', text:'射手第一人稱'})); }
   stage.objects.filter(o => o.type === 'viewpoint').forEach(o => sel.appendChild(el('option', {value:o.id, text:'射手視角：' + o.label})));
   sel.value = [...sel.options].some(x => x.value === cur) ? cur : 'orbit';
   v3d.mode = sel.value;
+  syncFlyPad();
 }
 let orbitInit = false, orbitAuto = false;   // orbitAuto: view not moved by the user yet, so refit when the pane size changes
 function objBounds(){
@@ -566,7 +588,47 @@ function resetOrbit(force){
   v3d.dist = Math.max(4, Math.min(60, Math.max((across / 2) / th * 1.2, (D * Math.sin(v3d.pitch) / 2 + 1) / tv * 1.12)));
   orbitInit = true; orbitAuto = true;
 }
-function camera(){
+/* ---------- free-moving camera: walk / fly anywhere, look in any direction ---------- */
+function freeFromCam(cam){
+  if(!cam){ const m = v3d.mode; v3d.mode = 'orbit'; if(!orbitInit) resetOrbit(false); cam = camera0(); v3d.mode = m; }
+  v3d.free = {x:cam.C[0], y:cam.C[1], z:Math.max(0.2, cam.C[2]), yaw:Math.atan2(cam.F[1], cam.F[0]), pitch:Math.asin(Math.max(-1, Math.min(1, cam.F[2])))};
+}
+// move the free camera: fw = forward along the heading (level), rt = to the right, up = height; metres
+function freeMove(fw, rt, up){
+  const f = v3d.free; if(!f) return;
+  const c = Math.cos(f.yaw), s = Math.sin(f.yaw);
+  f.x += c*fw + s*rt; f.y += s*fw - c*rt; f.z = Math.max(0.15, Math.min(40, f.z + up));
+  syncFlyPad(true);
+}
+const FLY = {keys:new Set(), raf:0, last:0};
+function flyLoop(ts){
+  FLY.raf = 0;
+  if(v3d.mode !== 'free' || !FLY.keys.size || leftTab !== '3d'){ FLY.keys.clear(); flyPadMark(); return; }
+  const dt = FLY.last ? Math.min(0.25, (ts - FLY.last) / 1000) : 0.016; FLY.last = ts;
+  const K = FLY.keys, v = (K.has('fast') ? 6 : 2.5) * dt;
+  const fw = (K.has('f') ? 1 : 0) - (K.has('b') ? 1 : 0), rt = (K.has('r') ? 1 : 0) - (K.has('l') ? 1 : 0), up = (K.has('u') ? 1 : 0) - (K.has('d') ? 1 : 0);
+  freeMove(fw * v, rt * v, up * v * 0.7);
+  render3d();
+  FLY.raf = requestAnimationFrame(flyLoop);
+}
+function flyKey(k, on){
+  if(on) FLY.keys.add(k); else FLY.keys.delete(k);
+  flyPadMark();
+  if(FLY.keys.size && !FLY.raf){ FLY.last = 0; FLY.raf = requestAnimationFrame(flyLoop); }
+}
+function flyPadMark(){ document.querySelectorAll('#flyPad button').forEach(b => b.classList.toggle('on', FLY.keys.has(b.dataset.k))); }
+function syncFlyPad(onlyText){
+  const pad = $('flyPad'); if(!pad) return;
+  if(!onlyText) pad.classList.toggle('hidden', v3d.mode !== 'free');
+  const h = $('flyH'); if(h && v3d.free) h.textContent = '鏡頭高 ' + fmt(v3d.free.z, 2) + ' m';
+}
+function camera(){ const c = camera0(); v3d.lastCam = c; return c; }
+function camera0(){
+  if(v3d.mode === 'free'){
+    if(!v3d.free) freeFromCam(null);
+    const f = v3d.free, cp = Math.cos(f.pitch);
+    return basis([f.x, f.y, f.z], [cp*Math.cos(f.yaw), cp*Math.sin(f.yaw), Math.sin(f.pitch)], v3d.fov, null);
+  }
   if(RP.on && (v3d.mode === 'follow' || v3d.mode === 'fpv')){
     const p = figPos(RP.t), eye = figEye(RP.t);
     const nxt = RP.res.shots.find(x => x.t >= RP.t - 0.12), o = nxt && getObj(nxt.target);
@@ -950,7 +1012,7 @@ function bind3d(){
     c.setPointerCapture(e.pointerId); touches.set(e.pointerId, [e.clientX, e.clientY]);
     if(touches.size === 2){ down = null; pinch = pst(); return; }
     if(touches.size > 2) return;
-    down = {x:e.clientX, y:e.clientY, pan:e.button === 2 || e.shiftKey, v:{...v3d}};
+    down = {x:e.clientX, y:e.clientY, pan:e.button === 2 || e.shiftKey, v:{...v3d}, f:v3d.free ? {...v3d.free} : null};
   });
   const lift = e => { touches.delete(e.pointerId); if(touches.size < 2) pinch = null; if(touches.size === 0) down = null; };
   c.addEventListener('pointercancel', lift);
@@ -958,7 +1020,9 @@ function bind3d(){
     if(touches.has(e.pointerId)) touches.set(e.pointerId, [e.clientX, e.clientY]);
     if(pinch && touches.size >= 2){
       const n = pst(), f = n.d / pinch.d, dx = n.m[0] - pinch.m[0], dy = n.m[1] - pinch.m[1];
-      if(v3d.mode === 'orbit'){
+      if(v3d.mode === 'free'){
+        const k = 0.01; freeMove(Math.log(f) * 4, -dx * k, dy * k);
+      }else if(v3d.mode === 'orbit'){
         v3d.dist = Math.max(1.5, Math.min(120, v3d.dist / f));
         const k = v3d.dist / 600, cy = Math.cos(v3d.yaw), sy = Math.sin(v3d.yaw);
         v3d.tx += (sy*dx - cy*dy) * k; v3d.ty += (-cy*dx - sy*dy) * k;
@@ -967,7 +1031,11 @@ function bind3d(){
     }
     if(!down) return;
     const dx = e.clientX - down.x, dy = e.clientY - down.y;
-    if(v3d.mode === 'orbit'){
+    if(v3d.mode === 'free'){
+      const f = v3d.free; if(!f || !down.f) return;
+      if(down.pan){ Object.assign(f, down.f); freeMove(0, -dx * 0.01, dy * 0.01); }   // slide sideways / up and down
+      else { f.yaw = down.f.yaw - dx * 0.005; f.pitch = Math.max(-1.45, Math.min(1.45, down.f.pitch - dy * 0.005)); }
+    }else if(v3d.mode === 'orbit'){
       orbitAuto = false;
       if(down.pan){
         const k = v3d.dist / 600, cy = Math.cos(v3d.yaw), sy = Math.sin(v3d.yaw);
@@ -986,14 +1054,36 @@ function bind3d(){
   c.addEventListener('pointerup', e => { lift(e); down = null; });
   c.addEventListener('wheel', e => {
     e.preventDefault(); orbitAuto = false;
-    if(v3d.mode === 'orbit') v3d.dist = Math.max(1.5, Math.min(120, v3d.dist * Math.pow(1.0015, e.deltaY)));
+    if(v3d.mode === 'free'){ const f = v3d.free; if(f){ const st = -e.deltaY * 0.006, cp = Math.cos(f.pitch); f.x += Math.cos(f.yaw)*cp*st; f.y += Math.sin(f.yaw)*cp*st; f.z = Math.max(0.15, f.z + Math.sin(f.pitch)*st); syncFlyPad(true); } }
+    else if(v3d.mode === 'orbit') v3d.dist = Math.max(1.5, Math.min(120, v3d.dist * Math.pow(1.0015, e.deltaY)));
     else v3d.eyeFov = Math.max(25, Math.min(110, v3d.eyeFov * Math.pow(1.001, e.deltaY)));
     render3d();
   }, {passive:false});
   $('tabImg').addEventListener('click', () => setLeftTab('img'));
   $('tab3d').addEventListener('click', () => setLeftTab('3d'));
-  $('v3dMode').addEventListener('change', e => { v3d.mode = e.target.value; v3d.eyeYaw = 0; v3d.eyePitch = -0.05; setLeftTab('3d'); });
-  $('v3dReset').addEventListener('click', () => { if(v3d.mode === 'orbit') resetOrbit(true); else { v3d.eyeYaw = 0; v3d.eyePitch = -0.05; v3d.eyeFov = 70; } render3d(); });
+  $('v3dMode').addEventListener('change', e => {
+    // the free camera starts exactly where the current view is, so switching does not jump
+    if(e.target.value === 'free' && v3d.mode !== 'free' && v3d.lastCam) freeFromCam(v3d.lastCam);
+    v3d.mode = e.target.value; v3d.eyeYaw = 0; v3d.eyePitch = -0.05; syncFlyPad(); setLeftTab('3d'); });
+  $('v3dReset').addEventListener('click', () => { if(v3d.mode === 'orbit') resetOrbit(true); else if(v3d.mode === 'free'){ freeFromCam(null); syncFlyPad(true); } else { v3d.eyeYaw = 0; v3d.eyePitch = -0.05; v3d.eyeFov = 70; } render3d(); });
+  // free camera: keyboard (only while the 3D view is shown and no text field has the focus) and the on-screen pad
+  const FK = {KeyW:'f', ArrowUp:'f', KeyS:'b', ArrowDown:'b', KeyA:'l', ArrowLeft:'l', KeyD:'r', ArrowRight:'r', KeyE:'u', PageUp:'u', KeyQ:'d', PageDown:'d'};
+  const typing = () => { const a = document.activeElement; return a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable); };
+  // the keys steer the camera only after the 3D view was clicked last (arrow keys otherwise nudge the selected object)
+  document.addEventListener('pointerdown', e => { FLY.armed = e.target === c || !!(e.target.closest && e.target.closest('#flyPad')); }, true);
+  document.addEventListener('keydown', e => {
+    if(v3d.mode !== 'free' || leftTab !== '3d' || !FLY.armed || typing() || e.ctrlKey || e.metaKey || e.altKey) return;
+    if(e.key === 'Shift'){ FLY.keys.add('fast'); return; }
+    const k = FK[e.code]; if(!k) return; e.preventDefault(); e.stopImmediatePropagation(); flyKey(k, true);
+  }, true);
+  document.addEventListener('keyup', e => { if(e.key === 'Shift'){ FLY.keys.delete('fast'); return; } const k = FK[e.code]; if(k) flyKey(k, false); });
+  window.addEventListener('blur', () => { FLY.keys.clear(); flyPadMark(); });
+  document.querySelectorAll('#flyPad button').forEach(b => {
+    const off = e => { flyKey(b.dataset.k, false); };
+    b.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); try{ b.setPointerCapture(e.pointerId); }catch(err){} flyKey(b.dataset.k, true); });
+    b.addEventListener('pointerup', off); b.addEventListener('pointercancel', off); b.addEventListener('lostpointercapture', off);
+    b.addEventListener('contextmenu', e => e.preventDefault());
+  });
   $('profExport').addEventListener('click', () => { const cur = SHOOTERS.list.find(x => x.id === SHOOTERS.activeId); const o = stripAliases(PROFILE); o.name = cur.name; download('射手_' + safeName(cur.name) + '.profile.json', o); });
   $('profImport').addEventListener('click', () => $('profImportFile').click());
   $('libExport').addEventListener('click', exportAllShooters);
@@ -1045,7 +1135,13 @@ function suggestRegions(){
   if(!(yTop > yBot + 0.5) || !isFinite(x0)) return {polys:[], src:'none'};
   return {polys:[[[x0, yBot], [x1, yBot], [x1, yTop], [x0, yTop]]], src:'floor'};
 }
+// candidate stops: the stop point is the body centre, so keep it 25 cm inside the boundary (feet stay clear of the
+// fault line with a small safety margin); fall back to 15 cm for very narrow areas
 function candidatePoints(step){
+  const pts = candidatePoints0(step, 0.25);
+  return pts.length ? pts : candidatePoints0(step, 0.15);
+}
+function candidatePoints0(step, margin){
   const pts = [];
   candidatePoints.src = 'none';
   const R = suggestRegions(); candidatePoints.src = R.src;
@@ -1056,7 +1152,7 @@ function candidatePoints(step){
       if(!pointInPoly(x, y, a.pts)) continue;
       let dmin = Infinity;
       for(let i = 0, j = a.pts.length - 1; i < a.pts.length; j = i++) dmin = Math.min(dmin, distPtSeg(x, y, a.pts[j][0], a.pts[j][1], a.pts[i][0], a.pts[i][1]));
-      if(dmin >= 0.15 && !blockedSpot(x, y)) pts.push([+x.toFixed(2), +y.toFixed(2)]);
+      if(dmin >= margin && !blockedSpot(x, y)) pts.push([+x.toFixed(2), +y.toFixed(2)]);
     }
   });
   return pts;
@@ -1120,7 +1216,7 @@ function finishSuggest(rows, targets){
     let cur = start ? [start.x, start.y] : stops[0].p, rest = stops.slice(), order = [], L = 0;
     while(rest.length){
       let bi = 0, bd = Infinity;
-      rest.forEach((s, k) => { const d = Math.hypot(s.p[0] - cur[0], s.p[1] - cur[1]); if(d < bd){ bd = d; bi = k; } });
+      rest.forEach((s, k) => { const d = walkPath(cur, s.p).len; if(d < bd){ bd = d; bi = k; } });
       L += bd; cur = rest[bi].p; order.push(rest.splice(bi, 1)[0]);
     }
     return {L, order};
@@ -1234,7 +1330,8 @@ function drawSuggestOverlay(ctx, toS){
   const purple = '#6B3FA0';
   // path
   const start = startObj();
-  const path = (start ? [[start.x, start.y]] : []).concat(pr.stops.map(s => s.p));
+  const way = (start ? [[start.x, start.y]] : []).concat(pr.stops.map(s => s.p)), path = way.length ? [way[0]] : [];
+  for(let i = 1; i < way.length; i++) path.push(...walkPath(way[i-1], way[i]).pts.slice(1));
   if(path.length > 1 && pathW(ctx, toS, path)){ ctx.setLineDash([6,4]); ctx.strokeStyle = 'rgba(107,63,160,.6)'; ctx.lineWidth = 2; ctx.stroke(); ctx.setLineDash([]); }
   pr.stops.forEach((st, j) => {
     const q0 = toS(st.p[0], st.p[1]); if(!q0) return;

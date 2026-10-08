@@ -19,19 +19,8 @@ function optEasy(r, o){
   const ns = stage.objects.some(n => n.type === 'noshoot' && n.cover === o.id);
   return !ns && r.dist <= (o.type === 'paper' ? 6 : 5);
 }
-// order inside a stop: sweep by bearing, the last target toward the next move (easy exit), stop plate last
-function optOrderStop(plan, k){
-  const st = plan.stops[k], vis = stopVisMemo(st), prev = k > 0 ? plan.stops[k-1] : null, next = plan.stops[k+1] || null;
-  const d = downDir(), right = [d[1], -d[0]], lat = v => v[0]*right[0] + v[1]*right[1];
-  const ids = st.targets.slice();
-  ids.sort((a, b) => (vis[a.id]?.bearing || 0) - (vis[b.id]?.bearing || 0));
-  let rev = false;
-  if(next){ rev = lat([next.x - st.x, next.y - st.y]) < 0; }                    // leaving to the left: finish on the left
-  else if(prev){ rev = lat([st.x - prev.x, st.y - prev.y]) < 0; }                // last stop: start on the side we came from
-  if(rev) ids.reverse();
-  const sp = ids.findIndex(x => getObj(x.id)?.type === 'stopplate'); if(sp >= 0){ const [x] = ids.splice(sp, 1); ids.push(x); }
-  st.targets = ids;
-}
+// order inside a stop: see orderStopTargets (swing angle, near ↔ far, posture changes, entry / exit side, stop plate last)
+function optOrderStop(plan, k){ orderStopTargets(plan, k); }
 function optFlags(plan){
   const start = optStart();
   plan.stops.forEach((st, k) => {
@@ -48,7 +37,7 @@ function optSequence(stops){
   const fixed = stops.map((s, i) => s.locked ? i : -1).filter(i => i >= 0);
   const spIdx = stops.findIndex(s => s.targets.some(t => getObj(t.id)?.type === 'stopplate'));
   const free = stops.filter((s, i) => !s.locked && i !== (stops[spIdx] && !stops[spIdx].locked ? spIdx : -2));
-  const cost = seq => { let c = 0, p = start, back = 0; const dd = downDir(); seq.forEach(s => { c += Math.hypot(s.x - p[0], s.y - p[1]); const along = (s.x - p[0])*dd[0] + (s.y - p[1])*dd[1]; if(along < -0.5) back += -along; p = [s.x, s.y]; }); return c + back * 1.5; };
+  const cost = seq => { let c = 0, p = start, back = 0; const dd = downDir(); seq.forEach(s => { c += walkPath(p, [s.x, s.y]).len; const along = (s.x - p[0])*dd[0] + (s.y - p[1])*dd[1]; if(along < -0.5) back += -along; p = [s.x, s.y]; }); return c + back * 1.5; };
   const assemble = order => {   // keep locked stops at their indices; free ones fill the gaps; stop plate stop last
     const out = new Array(stops.length).fill(null); fixed.forEach(i => out[i] = stops[i]);
     const tail = stops[spIdx] && !stops[spIdx].locked ? stops[spIdx] : null;
@@ -63,7 +52,7 @@ function optSequence(stops){
     perm(free.slice());
   }else{
     const left = free.slice(), order = []; let p = start;
-    while(left.length){ let bi = 0, bd = Infinity; left.forEach((s, i) => { const d = Math.hypot(s.x - p[0], s.y - p[1]); if(d < bd){ bd = d; bi = i; } }); const [s] = left.splice(bi, 1); order.push(s); p = [s.x, s.y]; }
+    while(left.length){ let bi = 0, bd = Infinity; left.forEach((s, i) => { const d = walkPath(p, [s.x, s.y]).len; if(d < bd){ bd = d; bi = i; } }); const [s] = left.splice(bi, 1); order.push(s); p = [s.x, s.y]; }
     tryOrder(order);
     for(let it = 0; it < 4; it++) for(let i = 0; i < order.length - 1; i++) for(let j = i + 1; j < order.length; j++){ const o2 = order.slice(0, i).concat(order.slice(i, j + 1).reverse(), order.slice(j + 1)); tryOrder(o2); }
   }
@@ -73,16 +62,7 @@ function optSequence(stops){
 function optAssign(plan, rowQ){
   const lockedT = new Set(plan.stops.filter(s => s.locked).flatMap(s => s.targets.map(t => t.id)));
   plan.stops.forEach(s => { if(!s.locked) s.targets = []; });
-  const missing = [];
-  engageable().forEach(t => {
-    if(lockedT.has(t.id)) return;
-    const q = st => { const r = stopVisMemo(st)[t.id]; let v = qual(r); if(v <= 0 && mechMoves(t) && mechTimeline(t, st).any) v = 0.5; return v; };
-    const cand = plan.stops.filter(s => !s.locked).map(s => ({s, q:q(s), d:Math.hypot(s.x - t.x, s.y - t.y)})).filter(c => c.q > 0);
-    if(!cand.length){ missing.push(t.id); return; }
-    const good = cand.filter(c => c.q >= 0.5 - 1e-9), pool = good.length ? good : cand;
-    pool.sort((a, b) => a.d - b.d || b.q - a.q);
-    pool[0].s.targets.push({id:t.id, n:t.type === 'paper' ? (t.hits || 2) : 1});
-  });
+  const missing = assignTargets(plan.stops, engageable(), lockedT);
   plan.stops = plan.stops.filter(s => s.locked || s.targets.length);
   return missing;
 }
@@ -91,6 +71,7 @@ function optFinish(plan){
   plan.stops = optSequence(plan.stops);
   plan.stops.forEach((s, k) => { if(!s.locked) optOrderStop(plan, k); });
   optFlags(plan);
+  if(plan.stops.length) plan.stops[plan.stops.length - 1].exitShoot = false;
   return plan;
 }
 function optEval(plan){ planCache = null; const R = computePlan(plan, {noMC:true}); return {R, hf:R.eHF, t:R.total}; }
@@ -149,7 +130,7 @@ async function optimizeRoute(progress){
         const kind = Math.floor(rnd() * 5), k = free[Math.floor(rnd() * free.length)], st = p.stops[k];
         if(kind === 0 && st.targets.length){         // move one target to another stop that sees it
           const ti = Math.floor(rnd() * st.targets.length), t = st.targets[ti], o = getObj(t.id);
-          const to = free.filter(j => j !== k && qual(stopVisMemo(p.stops[j])[t.id]) > 0);
+          const to = free.filter(j => j !== k && engageTier(p.stops[j], o, stopVisMemo(p.stops[j])[t.id]) >= 2);
           if(!to.length || o?.type === 'stopplate') continue;
           st.targets.splice(ti, 1); p.stops[to[Math.floor(rnd() * to.length)]].targets.push(t);
           p.stops = p.stops.filter(s => s.locked || s.targets.length); optFinish(p);
@@ -159,15 +140,16 @@ async function optimizeRoute(progress){
         }else if(kind === 2){                        // shoot on entry / exit or not
           if(rnd() < 0.5) st.entryShoot = !st.entryShoot; else st.exitShoot = !st.exitShoot;
         }else if(kind === 3 && free.length > 1){     // drop a stop when its targets can go elsewhere
-          const ok = st.targets.every(t => free.some(j => j !== k && qual(stopVisMemo(p.stops[j])[t.id]) > 0));
+          const ok = st.targets.every(t => free.some(j => j !== k && engageTier(p.stops[j], getObj(t.id), stopVisMemo(p.stops[j])[t.id]) >= 2));
           if(!ok) continue;
           const ts = st.targets.slice(); p.stops.splice(k, 1);
-          ts.forEach(t => { const c = p.stops.filter(s => !s.locked && qual(stopVisMemo(s)[t.id]) > 0).sort((a, b) => Math.hypot(a.x - getObj(t.id).x, a.y - getObj(t.id).y) - Math.hypot(b.x - getObj(t.id).x, b.y - getObj(t.id).y))[0]; c.targets.push(t); });
+          ts.forEach(t => { const c = p.stops.filter(s => !s.locked && engageTier(s, getObj(t.id), stopVisMemo(s)[t.id]) >= 2).sort((a, b) => Math.hypot(a.x - getObj(t.id).x, a.y - getObj(t.id).y) - Math.hypot(b.x - getObj(t.id).x, b.y - getObj(t.id).y))[0]; c.targets.push(t); });
           optFinish(p);
         }else{                                        // reverse the sweep inside a stop
           const sp = st.targets.findIndex(x => getObj(x.id)?.type === 'stopplate');
           const body = st.targets.filter((x, i) => i !== sp).reverse(); if(sp >= 0) body.push(st.targets[sp]); st.targets = body;
         }
+        if(p.stops.length) p.stops[p.stops.length - 1].exitShoot = false;   // nothing to leave toward after the last stop
         const rec = keep(p); evals++;
         if(rec.hf > cur.hf + 1e-6) cur = rec;
         if(evals % 10 === 0){ say('尋找更好的路線 ' + evals + ' / ' + budget); await optTick(); }

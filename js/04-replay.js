@@ -69,14 +69,8 @@ function startReplay(opts){
   const T = PROFILE.time, start = startObj();
   // movement windows per stop
   const stops = []; let prev = start ? [start.x, start.y] : [plan.stops[0].x, plan.stops[0].y];
-  plan.stops.forEach((st, k) => {
-    const d = Math.hypot(st.x - prev[0], st.y - prev[1]);
-    const lastPrev = k > 0 ? Math.max(0, ...R.shots.filter(x => x.stop === k - 1).map(x => x.t)) : 0;
-    const dep = k === 0 ? 0 : lastPrev + T.exitT;
-    const arr = d > 0.3 ? dep + T.startCost + d / effSpeed(prev, [st.x, st.y]) : dep;
-    stops.push({from:prev.slice(), to:[st.x, st.y], dep, arr, stance:st.stance || 'stand', postT:PROFILE.postures[st.stance || 'stand']?.t || 0, reload:st.reload});
-    prev = [st.x, st.y];
-  });
+  plan.stops.forEach((st, k) => { stops.push(replayLeg(R, k, st, prev)); prev = [st.x, st.y]; });
+  annotateAdj(R, plan);
   // outcome of every shot
   const r = rng(opts && opts.seed || 12345);
   const outcomes = R.shots.map(x => {
@@ -101,14 +95,43 @@ function buildRun(plan){
   const R = computePlan(plan); planCache = null;
   const T = PROFILE.time, start = startObj(), stops = [];
   let prev = start ? [start.x, start.y] : [plan.stops[0].x, plan.stops[0].y];
-  plan.stops.forEach((st, k) => {
-    const d = Math.hypot(st.x - prev[0], st.y - prev[1]);
-    const lastPrev = k > 0 ? Math.max(0, ...R.shots.filter(x => x.stop === k - 1).map(x => x.t)) : 0;
-    const dep = k === 0 ? 0 : lastPrev + T.exitT, arr = d > 0.3 ? dep + T.startCost + d / effSpeed(prev, [st.x, st.y]) : dep;
-    stops.push({from:prev.slice(), to:[st.x, st.y], dep, arr, stance:st.stance || 'stand', postT:PROFILE.postures[st.stance || 'stand']?.t || 0, reload:st.reload});
-    prev = [st.x, st.y];
-  });
+  plan.stops.forEach((st, k) => { stops.push(replayLeg(R, k, st, prev)); prev = [st.x, st.y]; });
+  annotateAdj(R, plan);
   return {plan, res:R, stops, rl:reloadWindows(R, stops)};
+}
+// one movement leg of the replay: leave after the last shot of the previous stop, walk the path around the walls
+function replayLeg(R, k, st, prev){
+  const T = PROFILE.time, path = walkPath(prev, [st.x, st.y]), d = path.len;
+  const lastPrev = k > 0 ? Math.max(0, ...R.shots.filter(x => x.stop === k - 1).map(x => x.t)) : 0;
+  const dep = k === 0 ? 0 : lastPrev + T.exitT, arr = d > 0.3 ? dep + T.startCost + d / walkSpeed(path) : dep;
+  return {from:prev.slice(), to:[st.x, st.y], path, dep, arr, stance:st.stance || 'stand', postT:PROFILE.postures[st.stance || 'stand']?.t || 0, reload:st.reload, stop:st};
+}
+// the posture each shot really needs (lean out past a wall edge, crouch under a port...), from the visibility
+// check of its stop: the replay figure takes it before the shot, so it never appears to shoot through a wall
+function annotateAdj(R, plan){
+  R.shots.forEach(x => {
+    const st = plan.stops[x.stop]; if(!st){ x.adj = null; return; }
+    const r = stopVisMemo(st)[x.target];
+    x.adj = r && r.posture ? {key:r.postureKey || st.stance || 'stand', lat:r.lean || 0} : null;
+  });
+}
+function figAdj(t){
+  const k = stopAt(t); if(k < 0) return {lat:0, eye:null, key:null};
+  const S = RP.stops[k], list = RP.res.shots.filter(x => x.stop === k); if(!list.length) return {lat:0, eye:null, key:null};
+  let j = list.findIndex(x => shotFire(x) >= t - 0.06); if(j < 0) j = list.length - 1;
+  const cur = list[j], pv = j > 0 ? list[j-1] : null;
+  const a0 = pv ? pv.adj : null, a1 = cur.adj;
+  if(!a0 && !a1) return {lat:0, eye:null, key:null};
+  const t0 = pv ? shotFire(pv) + 0.05 : S.arr, t1 = Math.max(t0 + 0.12, shotFire(cur) - 0.08);
+  let u = Math.max(0, Math.min(1, (t - t0) / (t1 - t0))); u = u*u*(3 - 2*u);
+  const base = postureEye(S.stance || 'stand'), ey = a => a ? postureEye(a.key) : base, la = a => a ? a.lat : 0;
+  return {lat:la(a0) + (la(a1) - la(a0))*u, eye:ey(a0) + (ey(a1) - ey(a0))*u, key:(u >= 0.5 ? a1 : a0)?.key || null};
+}
+// walking direction of a leg at time t (along the path, not the straight line)
+function legDir(s, t){
+  if(!s.path) return [s.to[0] - s.from[0], s.to[1] - s.from[1]];
+  const u = Math.max(0, Math.min(1, (t - s.dep) / Math.max(1e-6, s.arr - s.dep))), e = u*u*(3 - 2*u);
+  return pathAt(s.path, s.path.len * e).dir;
 }
 function withRun(run, fn){ const bs = RP.stops, br = RP.res, bp = RP.plan, bl = RP.rl; RP.stops = run.stops; RP.res = run.res; RP.plan = run.plan; RP.rl = run.rl; try{ return fn(); } finally { RP.stops = bs; RP.res = br; RP.plan = bp; RP.rl = bl; } }
 function effSpeed(a, b){
@@ -133,11 +156,18 @@ function aimDirAt(t, p){
   return from + dA * u;
 }
 function figPos(t){
+  const p = figPos0(t), a = RP.res && RP.res.shots && RP.res.shots[0] && 'adj' in RP.res.shots[0] ? figAdj(t) : null;
+  if(!a || !a.lat) return p;
+  const d = downDir(); return [p[0] + d[1]*a.lat, p[1] - d[0]*a.lat];   // + = to the right of downrange (as in postures())
+}
+function figPos0(t){
   const S = RP.stops; if(!S.length) return [0, 0];
   for(let k = 0; k < S.length; k++){
     const s = S[k];
     if(t < s.dep) return s.from;
-    if(t <= s.arr){ const u = (t - s.dep) / Math.max(1e-6, s.arr - s.dep), e = u*u*(3 - 2*u); return [s.from[0] + (s.to[0] - s.from[0])*e, s.from[1] + (s.to[1] - s.from[1])*e]; }
+    if(t <= s.arr){ const u = (t - s.dep) / Math.max(1e-6, s.arr - s.dep), e = u*u*(3 - 2*u);
+      if(s.path && s.path.pts.length > 2) return pathAt(s.path, s.path.len * e).p;
+      return [s.from[0] + (s.to[0] - s.from[0])*e, s.from[1] + (s.to[1] - s.from[1])*e]; }
     if(k === S.length - 1 || t < S[k+1].dep) return s.to;
   }
   return S[S.length - 1].to;
@@ -161,8 +191,9 @@ function figEye(t){
 }
 function figEye0(t){
   const k = stopAt(t), stand = postureEye('stand'); if(k < 0) return stand;
-  const s = RP.stops[k]; if(s.stance === 'stand') return stand;
-  const u = Math.min(1, (t - s.arr) / Math.max(0.2, s.postT)); return stand + (postureEye(s.stance) - stand) * u;
+  const s = RP.stops[k], a = RP.res && RP.res.shots && RP.res.shots[0] && 'adj' in RP.res.shots[0] ? figAdj(t) : null;
+  const u = s.stance === 'stand' ? 1 : Math.min(1, (t - s.arr) / Math.max(0.2, s.postT)), e0 = stand + (postureEye(s.stance) - stand) * u;
+  return a && a.eye != null ? e0 + (a.eye - postureEye(s.stance || 'stand')) : e0;
 }
 // slats knocked off a Cooper tunnel in this replay (only when outcomes are drawn at random)
 function tunnelFallen(o){
@@ -306,7 +337,7 @@ function planPath3d(floor, labels){
   const plan = RP.on ? RP.plan : activePlan(); if(!plan || !plan.stops.length) return;
   if(!RP.on && !($('planShow') && $('planShow').checked)) return;
   const R = RP.on ? RP.res : planResult(plan), start = startObj();
-  const pts = (start ? [[start.x, start.y]] : []).concat(plan.stops.map(s => [s.x, s.y]));
+  const pts = planWalkPts(plan);
   for(let i = 1; i < pts.length; i++) floor.push({line:[[pts[i-1][0], pts[i-1][1], 0.012], [pts[i][0], pts[i][1], 0.012]], stroke:'rgba(31,110,140,.7)', wlw:0.05});
   plan.stops.forEach((s, k) => {
     floor.push({pts:circlePts(s.x, s.y, 0.22, 20).map(q => [q[0], q[1], 0.011]), fill:'rgba(31,110,140,.16)', stroke:'#1F6E8C', lw:1.5});
@@ -315,7 +346,7 @@ function planPath3d(floor, labels){
   (R.reloadLog || []).forEach(r => {
     const st = plan.stops[r.stop]; if(!st) return;
     const pv = r.stop === 0 ? (start ? [start.x, start.y] : [st.x, st.y]) : [plan.stops[r.stop - 1].x, plan.stops[r.stop - 1].y];
-    const at = r.forced || !r.moving ? [st.x + 0.4, st.y] : [(pv[0] + st.x) / 2, (pv[1] + st.y) / 2];
+    const at = r.forced || !r.moving ? [st.x + 0.4, st.y] : (w => pathAt(w, w.len / 2).p)(walkPath(pv, [st.x, st.y]));
     floor.push({pts:circlePts(at[0], at[1], 0.12, 14).map(q => [q[0], q[1], 0.014]), fill:'#F0A020', stroke:'#8A4F00', lw:1});
     labels.push({p:[at[0], at[1], 0.12], t:'換匣', c:'#8A4F00'});
   });
@@ -343,7 +374,7 @@ function replayFigure(faces, labels, colOverride, tag){
   const aA = aim ? aimDirAt(t, p) : null;
   if(aA != null) dir = [Math.cos(aA), Math.sin(aA)];
   else if(aim) dir = [aim[0] - p[0], aim[1] - p[1]];
-  else dir = mv ? [mv.to[0] - mv.from[0], mv.to[1] - mv.from[1]] : downDir();
+  else dir = mv ? legDir(mv, t) : downDir();
   { const se0 = figSeat(t); if(se0 && se0.obj && se0.obj.rot != null && (!aim || se0.straddle) && !(aA != null && !se0.straddle)) dir = facing(se0.obj.rot); }   // sit the way the chair, boat or horse faces
   const L = Math.hypot(dir[0], dir[1]) || 1; dir = [dir[0]/L, dir[1]/L];
   const side = [dir[1], -dir[0]];                                   // shooter's right

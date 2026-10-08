@@ -255,7 +255,12 @@
       <button id="rpExit">結束回放</button>
       <div class="tlwrap"><canvas id="rpTL" aria-label="逐槍時間軸：點一下跳到那一槍"></canvas></div>
     </div>
-    <div class="cwrap hidden" id="v3dWrap"><canvas id="v3dGL" aria-hidden="true"></canvas><canvas id="v3dCanvas"></canvas></div>
+    <div class="cwrap hidden" id="v3dWrap"><canvas id="v3dGL" aria-hidden="true"></canvas><canvas id="v3dCanvas"></canvas>
+      <div class="flypad hidden" id="flyPad" aria-label="自由移動鏡頭">
+        <div class="fp-move"><span></span><button data-k="f" aria-label="往前">▲</button><span></span><button data-k="l" aria-label="往左">◀</button><button data-k="b" aria-label="往後">▼</button><button data-k="r" aria-label="往右">▶</button></div>
+        <div class="fp-ud"><button data-k="u" aria-label="升高">升</button><button data-k="d" aria-label="降低">降</button></div>
+        <div class="fp-h readout" id="flyH"></div>
+      </div></div>
     <div class="pane-foot readout" id="imgReadout"></div>
   </section>
   <section class="pane" id="topPane">

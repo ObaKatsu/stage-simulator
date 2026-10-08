@@ -25,7 +25,7 @@ const TP_DEFAULT = {
   exitT:0.15, startCost:0.30, speed:3.0, entry:{full:0.35, rolling:0.15, move:0}, moveSplitPen:0.08,
   reloadStatic:1.20, reloadMove:1.00, windowOpen:0.50, oneHandMult:1.30, tunnelSpeed:0.45,
   climbUp:0.50, climbDown:0.40, sitDown:0.60, standUp:0.60, dismount:1.00, sitEye:0.78,
-  entryShootSave:0.60, exitShootSave:0.80
+  entryShootSave:0.60, exitShootSave:0.80, refocus:0.02
 };
 const HP_DEFAULT = {
   paper:[{A:90,C:9,D:1,M:0},{A:80,C:15,D:3,M:2},{A:70,C:20,D:5,M:5},{A:60,C:25,D:7,M:8}],
@@ -39,7 +39,7 @@ const TP_LABELS = [
   ['split.0','同靶 split：5 公尺內','s'],['split.1','同靶 split：5 到 8 公尺','s'],['split.2','同靶 split：8 到 10 公尺','s'],['split.3','同靶 split：10 公尺以上','s'],
   ['expPen.partial','部分遮蔽另加','s'],['expPen.heavy','嚴重遮蔽另加','s'],['steelPen','鋼靶、Falling Plate 另加','s'],['nsPen','有 no-shoot 的靶另加（精確瞄準）','s'],
   
-  ['exitT','出位時間','s'],['startCost','起步成本','s'],['speed','行進速度','m/s'],['tunnelSpeed','礦工隧道內移動速度（一般速度的倍數）','×'],['climbUp','站上講台、橋、船（估計）','s'],['climbDown','走下講台、橋、船（估計）','s'],['sitDown','坐下或跨坐上去（估計）','s'],['standUp','從座位起身（估計）','s'],['dismount','下馬（估計）','s'],['sitEye','坐姿眼睛高於座面（估計）','m'],['entryShootSave','進入射擊省下的進位時間比例（估計）','×'],['exitShootSave','離開射擊省下的出位時間比例（估計）','×'],
+  ['exitT','出位時間','s'],['startCost','起步成本','s'],['speed','行進速度','m/s'],['tunnelSpeed','礦工隧道內移動速度（一般速度的倍數）','×'],['climbUp','站上講台、橋、船（估計）','s'],['climbDown','走下講台、橋、船（估計）','s'],['sitDown','坐下或跨坐上去（估計）','s'],['standUp','從座位起身（估計）','s'],['dismount','下馬（估計）','s'],['sitEye','坐姿眼睛高於座面（估計）','m'],['entryShootSave','進入射擊省下的進位時間比例（估計）','×'],['exitShootSave','離開射擊省下的出位時間比例（估計）','×'],['refocus','換靶時遠近距離改變，每公尺距離差另加（估計）','s'],
   ['entry.full','進位：完全停頓','s'],['entry.rolling','進位：減速通過','s'],['entry.move','進位：移動中射擊','s'],['moveSplitPen','移動中射擊 split 另加','s'],
   ['reloadStatic','定點換匣','s'],['reloadMove','移動中換匣','s'],['windowOpen','開窗','s'],['oneHandMult','單手射擊 split 倍數','×']
 ];
@@ -123,29 +123,194 @@ function activePlan(){ return plans().find(p => p.id === activePlanId) || plans(
 function engageable(){ return stage.objects.filter(o => ['paper','popper','plate','stopplate'].includes(o.type)); }
 function stopVP(st){ return {id:'__plan_' + st.id, type:'viewpoint', x:st.x, y:st.y, rot:normDeg((stage.safety.downDeg || 0) - 180), stance:st.stance || 'stand'}; }
 function qual(r){ if(!r || r.status === 'unsafe' || r.status === 'back' || r.status === 'none') return 0; return r.exp - 0.08*(r.postureTime || 0); }
+/* ---------- walking paths: the shooter goes around walls, barrels, tables and props, never through them ----------
+   Obstacles are line segments (walls, the sides of barrels / tables / props). The path is the shortest one on a
+   visibility graph whose nodes sit just off the obstacle ends and corners, keeping WALK_CLEAR from every obstacle
+   (body half-width). Podiums, bridges, boats, tunnels and doors are walked onto / through, fault lines stepped over. */
+const WALK_CLEAR = 0.3, WALK_NODE = 0.42;
+let WALK = {key:'', segs:[], nodes:[], adj:null, memo:new Map()};
+function walkSegs(){
+  const segs = [];
+  const poly = (c, ref) => { for(let i = 0; i < c.length; i++) segs.push({a:c[i], b:c[(i+1) % c.length], ref}); };
+  stage.objects.forEach(o => {
+    if(o.type === 'wall'){
+      const L = Math.hypot(o.x2 - o.x1, o.y2 - o.y1); if(L < 1e-6) return;
+      const ux = (o.x2 - o.x1) / L, uy = (o.y2 - o.y1) / L, P = s => [o.x1 + ux*s, o.y1 + uy*s];
+      let cur = 0;   // a port reaching the floor and at least 1.5 m high is a doorway: walk through it
+      (o.ports || []).slice().sort((a, b) => a.off - b.off).forEach(pt => {
+        if(!((pt.bottom || 0) <= 0.05 && pt.h >= 1.5)) return;
+        const s0 = Math.max(0, pt.off), s1 = Math.min(L, pt.off + pt.w);
+        if(s0 > cur) segs.push({a:P(cur), b:P(s0), ref:o.id});
+        cur = Math.max(cur, s1);
+      });
+      if(cur < L) segs.push({a:P(cur), b:P(L), ref:o.id});
+    }else if(o.type === 'barrel'){ const r = (o.d || 0.6) / 2, c = []; for(let i = 0; i < 8; i++){ const t = i / 8 * Math.PI * 2; c.push([o.x + r*Math.cos(t), o.y + r*Math.sin(t)]); } poly(c, o.id); }
+    else if(o.type === 'table' || o.type === 'prop') poly(rectPts(o.x, o.y, o.w || 0.5, o.dp || 0.5, o.rot || 0), o.id);
+  });
+  return segs;
+}
+function segSegDist(p, q, a, b){
+  const d1 = (a[0]-p[0])*(q[1]-p[1]) - (a[1]-p[1])*(q[0]-p[0]), d2 = (b[0]-p[0])*(q[1]-p[1]) - (b[1]-p[1])*(q[0]-p[0]);
+  const d3 = (p[0]-a[0])*(b[1]-a[1]) - (p[1]-a[1])*(b[0]-a[0]), d4 = (q[0]-a[0])*(b[1]-a[1]) - (q[1]-a[1])*(b[0]-a[0]);
+  if(((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return 0;
+  return Math.min(distPtSeg(p[0], p[1], a[0], a[1], b[0], b[1]), distPtSeg(q[0], q[1], a[0], a[1], b[0], b[1]),
+                  distPtSeg(a[0], a[1], p[0], p[1], q[0], q[1]), distPtSeg(b[0], b[1], p[0], p[1], q[0], q[1]));
+}
+function walkClearAt(x, y, segs){ let m = Infinity; segs.forEach(s => { m = Math.min(m, distPtSeg(x, y, s.a[0], s.a[1], s.b[0], s.b[1])); }); return m; }
+// may the body walk straight from p to q? Endpoints already closer to an obstacle (a stop next to a wall) may stay that close
+function walkFree(p, q, segs){
+  for(const s of segs){
+    const need = Math.min(WALK_CLEAR, distPtSeg(p[0], p[1], s.a[0], s.a[1], s.b[0], s.b[1]), distPtSeg(q[0], q[1], s.a[0], s.a[1], s.b[0], s.b[1])) - 0.02;
+    const d = segSegDist(p, q, s.a, s.b);
+    if(d <= 1e-9 || d < need) return false;
+  }
+  return true;
+}
+function walkGraph(){
+  const key = JSON.stringify(stage.objects.filter(o => ['wall','barrel','table','prop'].includes(o.type)));
+  if(WALK.key === key) return WALK;
+  const segs = walkSegs(), nodes = [];
+  const ends = []; segs.forEach(s => { ends.push(s.a, s.b); });
+  ends.forEach(e => {
+    for(let i = 0; i < 8; i++){
+      const t = i / 8 * Math.PI * 2 + Math.PI / 8, n = [e[0] + WALK_NODE*Math.cos(t), e[1] + WALK_NODE*Math.sin(t)];
+      if(walkClearAt(n[0], n[1], segs) < WALK_CLEAR) continue;
+      if(stage.objects.some(o => (o.type === 'table' || o.type === 'prop') && pointInPoly(n[0], n[1], rectPts(o.x, o.y, o.w || 0.5, o.dp || 0.5, o.rot || 0)))) continue;
+      if(nodes.some(m => Math.hypot(m[0] - n[0], m[1] - n[1]) < 0.12)) continue;
+      nodes.push(n);
+    }
+  });
+  const adj = nodes.map(() => []);
+  for(let i = 0; i < nodes.length; i++) for(let j = i + 1; j < nodes.length; j++){
+    if(!walkFree(nodes[i], nodes[j], segs)) continue;
+    const d = Math.hypot(nodes[i][0] - nodes[j][0], nodes[i][1] - nodes[j][1]); adj[i].push([j, d]); adj[j].push([i, d]);
+  }
+  WALK = {key, segs, nodes, adj, memo:new Map()};
+  return WALK;
+}
+// walking path between two floor points: {pts:[a, ..., b], len, around:bool, blocked:bool}
+function walkPath(a, b){
+  const G = walkGraph(), k = a[0].toFixed(3) + ',' + a[1].toFixed(3) + '>' + b[0].toFixed(3) + ',' + b[1].toFixed(3);
+  if(G.memo.has(k)) return G.memo.get(k);
+  const direct = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  let res;
+  if(!G.segs.length || direct < 0.05 || walkFree(a, b, G.segs)) res = {pts:[a, b], len:direct, around:false, blocked:false};
+  else{
+    // Dijkstra over start, end and the graph nodes
+    const N = G.nodes.length, S = N, E = N + 1, P = G.nodes.concat([a, b]);
+    const dist = new Float64Array(N + 2).fill(Infinity), prev = new Int32Array(N + 2).fill(-1), done = new Uint8Array(N + 2);
+    const link = (i, p) => { const out = []; for(let j = 0; j < N; j++) if(walkFree(p, G.nodes[j], G.segs)) out.push([j, Math.hypot(p[0] - G.nodes[j][0], p[1] - G.nodes[j][1])]); return out; };
+    const fromS = link(S, a), toE = new Map(link(E, b).map(([j, d]) => [j, d]));
+    dist[S] = 0;
+    for(;;){
+      let u = -1, best = Infinity;
+      for(let i = 0; i < N + 2; i++) if(!done[i] && dist[i] < best){ best = dist[i]; u = i; }
+      if(u < 0 || u === E) break;
+      done[u] = 1;
+      const nb = u === S ? fromS : G.adj[u].concat(toE.has(u) ? [[E, toE.get(u)]] : []);
+      nb.forEach(([v, d]) => { if(dist[u] + d < dist[v]){ dist[v] = dist[u] + d; prev[v] = u; } });
+    }
+    if(!isFinite(dist[E])) res = {pts:[a, b], len:direct, around:false, blocked:true};
+    else{ const pts = []; for(let v = E; v >= 0; v = prev[v]) pts.unshift(P[v]); pts[0] = a; pts[pts.length - 1] = b; res = {pts, len:dist[E], around:true, blocked:false}; }
+  }
+  if(G.memo.size > 4000) G.memo.clear();
+  G.memo.set(k, res);
+  return res;
+}
+// effective speed along a path: sideways steps are slower than running forward / back (body test, when measured)
+function walkSpeed(path){
+  const T = PROFILE.time; if(!(PROFILE.body && PROFILE.body.lateral3m) || !(path.len > 0)) return T.speed;
+  const dd = downDir(), P = path.pts; let side = 0;
+  for(let i = 1; i < P.length; i++) side += Math.abs((P[i][0] - P[i-1][0])*dd[1] - (P[i][1] - P[i-1][1])*dd[0]);
+  const sAng = Math.min(1, side / path.len), vl = 3 / Math.max(0.3, PROFILE.body.lateral3m - T.startCost);
+  return 1 / ((1 - sAng) / T.speed + sAng / vl);
+}
+function tunnelInsidePath(o, path){
+  const P = path.pts, out = {len:0, slats:0, idx:[]};
+  for(let i = 1; i < P.length; i++){ const r = tunnelInside(o, P[i-1], P[i]); out.len += r.len; out.slats += r.slats; (r.idx || []).forEach(j => { if(!out.idx.includes(j)) out.idx.push(j); }); }
+  out.slats = out.idx.length || out.slats;
+  return out;
+}
+// the walked route of a plan (start → S1 → S2 ...), going around walls
+function planWalkPts(plan){
+  const start = startObj(), out = [];
+  let prev = start ? [start.x, start.y] : null;
+  plan.stops.forEach(st => { const b = [st.x, st.y]; if(!prev){ out.push(b); prev = b; return; } const w = walkPath(prev, b).pts; if(!out.length) out.push(w[0]); out.push(...w.slice(1)); prev = b; });
+  return out;
+}
+// point at arc length s along a path polyline, and the walking direction there
+function pathAt(path, s){
+  const P = path.pts; let acc = 0;
+  for(let i = 1; i < P.length; i++){
+    const L = Math.hypot(P[i][0] - P[i-1][0], P[i][1] - P[i-1][1]);
+    if(acc + L >= s || i === P.length - 1){ const u = L > 1e-9 ? Math.max(0, Math.min(1, (s - acc) / L)) : 1; return {p:[P[i-1][0] + (P[i][0] - P[i-1][0])*u, P[i-1][1] + (P[i][1] - P[i-1][1])*u], dir:[P[i][0] - P[i-1][0], P[i][1] - P[i-1][1]]}; }
+    acc += L;
+  }
+  return {p:P[P.length - 1].slice(), dir:[P[P.length-1][0] - P[0][0], P[P.length-1][1] - P[0][1]]};
+}
 function nextPlanName(){ const used = plans().map(p => p.name); for(let i = 0; i < 26; i++){ const n = String.fromCharCode(65 + i); if(!used.includes(n)) return n; } return 'P' + (plans().length + 1); }
+// how well a stop engages a target, for automatic assignment: 3 = seen 50 % or more in the stop's own posture,
+// 2 = 50 % or more after a posture change or lean (or a moving target exposed while it swings / slides),
+// 1 = only a small part visible, 0 = cannot be shot (hidden by a wall, back side, outside the safe angle)
+function engageTier(st, t, r){
+  if(!r || r.status === 'unsafe' || r.status === 'back') return 0;
+  if(r.status === 'none') return mechMoves(t) && mechTimeline(t, st).any ? 2 : 0;
+  if(r.nomExp != null && r.nomExp >= 0.5 && !r.posture) return 3;
+  if(r.exp >= 0.5) return 2;
+  return mechMoves(t) && mechTimeline(t, st).any ? 2 : 1;
+}
+// assign every target to a stop: the best tier first, then the nearest stop (as on site: a target is shot from the
+// closest position that sees it well); the stop plate goes to the last stop that can shoot it
+function assignTargets(stops, list, skip){
+  const unassigned = [];
+  list.forEach(t => {
+    if(skip && skip.has(t.id)) return;
+    const c = stops.map((st, j) => { const r = stopVisMemo(st)[t.id]; return {j, tier:engageTier(st, t, r), q:qual(r), d:Math.hypot(st.x - t.x, st.y - t.y)}; }).filter(c => c.tier > 0 && !stops[c.j].locked);
+    if(!c.length){ unassigned.push(t.id); return; }
+    let pick;
+    if(t.type === 'stopplate') pick = c.filter(x => x.tier === Math.max(...c.map(y => y.tier))).sort((a, b) => b.j - a.j)[0];
+    else { const top = Math.max(...c.map(x => x.tier)); pick = c.filter(x => x.tier === top).sort((a, b) => a.d - b.d || b.q - a.q)[0]; }
+    stops[pick.j].targets.push({id:t.id, n:t.type === 'paper' ? (t.hits || 2) : 1});
+  });
+  return unassigned;
+}
+// shooting order inside a stop. Minimises the modelled transitions: swing angle, change of distance (near ↔ far)
+// and posture changes, starting on the side the shooter comes from and finishing toward the next move; stop plate last.
+function orderStopTargets(plan, k){
+  const st = plan.stops[k], vis = stopVisMemo(st), prev = k > 0 ? [plan.stops[k-1].x, plan.stops[k-1].y] : (startObj() ? [startObj().x, startObj().y] : null), next = plan.stops[k+1] || null;
+  const d = downDir(), lat = v => v[0]*d[1] - v[1]*d[0];   // + = to the right of downrange
+  const T = PROFILE.time, stance = st.stance || 'stand';
+  let ids = st.targets.slice();
+  const spI = ids.findIndex(x => getObj(x.id)?.type === 'stopplate'), sp = spI >= 0 ? ids.splice(spI, 1)[0] : null;
+  const n = ids.length;
+  if(n > 1){
+    const R = ids.map(x => vis[x.id] || {bearing:0, dist:0}), B = R.map(r => r.bearing || 0), D = R.map(r => r.dist || 0);
+    const adj = R.map(r => r.posture ? (r.postureKey || '') + ':' + (r.lean || 0) : '');
+    const bmin = Math.min(...B), bmax = Math.max(...B);
+    const pair = (i, j) => { const a = normDeg(B[j] - B[i]); return transTime(Math.abs(a), Math.sign(a) || 1, stance, 0) + (T.refocus ?? 0.02) * Math.abs(D[j] - D[i]) + (adj[i] !== adj[j] ? 0.25 : 0); };
+    const W = 0.002, inL = prev ? lat([st.x - prev[0], st.y - prev[1]]) : 0, outL = next ? lat([next.x - st.x, next.y - st.y]) : 0;
+    const first = i => Math.abs(inL) > 0.3 ? W * (inL > 0 ? B[i] - bmin : bmax - B[i]) : 0.0005 * (B[i] - bmin);   // came from the left: start on the left
+    const last = i => Math.abs(outL) > 0.3 ? W * (outL < 0 ? B[i] - bmin : bmax - B[i]) : 0;                       // leaving to the left: finish on the left
+    let order;
+    if(n <= 10){
+      const N = 1 << n, f = new Float64Array(N * n).fill(Infinity), pr = new Int8Array(N * n).fill(-1);
+      for(let i = 0; i < n; i++) f[(1 << i) * n + i] = first(i);
+      for(let m = 1; m < N; m++) for(let i = 0; i < n; i++){ const v = f[m*n + i]; if(!(m & (1 << i)) || v === Infinity) continue;
+        for(let j = 0; j < n; j++){ if(m & (1 << j)) continue; const m2 = m | (1 << j), w = v + pair(i, j); if(w < f[m2*n + j]){ f[m2*n + j] = w; pr[m2*n + j] = i; } } }
+      let bi = 0, bv = Infinity; for(let i = 0; i < n; i++){ const v = f[(N-1)*n + i] + last(i); if(v < bv){ bv = v; bi = i; } }
+      order = []; let m = N - 1, i = bi; while(i >= 0){ order.unshift(i); const p0 = pr[m*n + i]; m &= ~(1 << i); i = p0; }
+    }else order = ids.map((_, i) => i).sort((a, b) => B[a] - B[b]);
+    ids = order.map(i => ids[i]);
+  }
+  if(sp) ids.push(sp);
+  st.targets = ids;
+}
 function buildPlan(points, name){
   const stops = points.map(pt => ({id:uid(), x:pt.x, y:pt.y, stance:pt.stance || 'stand', stopType:'full', reload:false, targets:[]}));
-  const vis = stops.map(st => { const m = {}; computeVis(stopVP(st), {coarse:true}).forEach(r => m[r.id] = r); return m; });
-  const unassigned = [];
-  engageable().forEach(t => {
-    // among the stops that can engage the target, the nearest one; well-exposed (50% or more) stops come first
-    const q = j => { let v = qual(vis[j][t.id]); if(v <= 0 && mechMoves(t) && mechTimeline(t, stops[j]).any) v = 0.5; return v; };
-    const d = j => Math.hypot(stops[j].x - t.x, stops[j].y - t.y);
-    const ok = stops.map((_, j) => j).filter(j => q(j) > 0), good = ok.filter(j => q(j) >= 0.5 - 1e-9);
-    const pool = good.length ? good : ok;
-    let bi = pool.length ? pool.reduce((b, j) => (d(j) < d(b) - 1e-6 || (Math.abs(d(j) - d(b)) <= 1e-6 && q(j) > q(b))) ? j : b, pool[0]) : -1;
-    if(t.type === 'stopplate'){ for(let j = stops.length - 1; j >= 0; j--) if(q(j) > 0){ bi = j; break; } }
-    if(bi < 0){ unassigned.push(t.id); return; }
-    stops[bi].targets.push({id:t.id, n:t.type === 'paper' ? (t.hits || 2) : 1});
-  });
-  // left-to-right order inside each stop; stop plate always last
-  stops.forEach((st, j) => {
-    st.targets.sort((a, b) => (vis[j][a.id]?.bearing || 0) - (vis[j][b.id]?.bearing || 0));
-    const sp = st.targets.findIndex(x => getObj(x.id)?.type === 'stopplate');
-    if(sp >= 0){ const [x] = st.targets.splice(sp, 1); st.targets.push(x); }
-  });
-  return {id:uid(), name:name || nextPlanName(), stops, overrides:{}, unassigned};
+  const unassigned = assignTargets(stops, engageable());
+  const plan = {id:uid(), name:name || nextPlanName(), stops, overrides:{}, unassigned};
+  stops.forEach((st, k) => orderStopTargets(plan, k));
+  return plan;
 }
 let vpPick = null;   // {viewpointId: order} while choosing viewpoints for a new plan
 function renderVpPicker(box){
@@ -397,19 +562,15 @@ function computePlan(plan, opts){
   const hitTime = {};    // target id -> when the BB of its last shot arrives (activations start from the hit)
   plan.stops.forEach((st, k) => {
     const vis = stopVisMemo(st);
-    const d = Math.hypot(st.x - prev[0], st.y - prev[1]);
-    const moving = d > 0.3;
-    let vEff = T.speed;
-    if(moving && PROFILE.body && PROFILE.body.lateral3m){
-      const dd = downDir(), sAng = Math.abs(((st.x - prev[0])*dd[1] - (st.y - prev[1])*dd[0]) / (d || 1));   // share of sideways movement
-      const vl = 3 / Math.max(0.3, PROFILE.body.lateral3m - T.startCost);
-      vEff = 1 / ((1 - sAng) / T.speed + sAng / vl);
-    }
+    const wp = walkPath(prev, [st.x, st.y]), d = wp.len;   // around walls and obstacles, never through them
+    const moving = Math.hypot(st.x - prev[0], st.y - prev[1]) > 0.3 || d > 0.3;
+    if(wp.blocked) warnings.push('S' + (k+1) + '：找不到繞過檔牆或障礙物的走法，暫以直線距離計算；請檢查停頓點位置');
+    let vEff = moving ? walkSpeed(wp) : T.speed;
     // crossing a Cooper tunnel: slower (bent low) and every slat passed may be knocked down (1 PE each)
     let tunExtra = 0;
     if(moving) stage.objects.forEach(o => {
       if(o.type !== 'tunnel' || o.x1 == null) return;
-      const ins = tunnelInside(o, prev, [st.x, st.y]); if(ins.len < 0.05) return;
+      const ins = tunnelInsidePath(o, wp); if(ins.len < 0.05) return;
       const f = Math.min(1, Math.max(0.1, T.tunnelSpeed || 0.45));
       tunExtra += ins.len / vEff * (1 / f - 1);
       tunnelRisk.push({tunnel:o.id, label:o.label, stop:k, n:ins.slats, p:o.knockP != null ? o.knockP : TUNNEL_DEF.knockP, idx:ins.idx, len:ins.len});
@@ -472,7 +633,7 @@ function computePlan(plan, opts){
       if(oneHand) sp *= T.oneHandMult;
 
       // shots fired while entering or leaving count as rolling shots (accuracy and split)
-      const onMove = (entryShoot && o.id === firstTid) || (exitShoot && o.id === lastTid && st.targets.length > 1) || (exitShoot && st.targets.length === 1);
+      const onMove = o.type !== 'stopplate' && ((entryShoot && o.id === firstTid) || (exitShoot && o.id === lastTid && st.targets.length > 1) || (exitShoot && st.targets.length === 1));   // the stop plate is always shot fully set
       const stEff = onMove && st.stopType === 'full' ? 'rolling' : st.stopType;
       const hd0 = steel ? null : hitDist(band, expo, stEff, oneHand, hasNS), pS = steel ? steelP(band, stEff) : null;
       const flight = bbFlight(dist);
@@ -496,7 +657,8 @@ function computePlan(plan, opts){
         }else if(prevTarget !== o.id){
           const a = r && prevTarget && vis[prevTarget] ? Math.abs(normDeg(r.bearing - vis[prevTarget].bearing)) : 30;
           const sgn = r && prevTarget && vis[prevTarget] ? Math.sign(normDeg(r.bearing - vis[prevTarget].bearing)) : 1;
-          dt = transTime(a, sgn, stance, sp - T.split[0]) + extraPost; parts.shoot = dt - extraPost; parts.wait = extraPost; kind = '換靶（' + Math.round(a) + '°）';
+          const dD = r && prevTarget && vis[prevTarget] ? Math.abs(r.dist - vis[prevTarget].dist) : 0, refo = (T.refocus ?? 0.02) * dD;   // near ↔ far: sight picture and pace change
+          dt = transTime(a, sgn, stance, sp - T.split[0]) + refo + extraPost; parts.shoot = dt - extraPost; parts.wait = extraPost; kind = '換靶（' + Math.round(a) + '°' + (dD >= 1.5 ? '，遠近差 ' + fmt(dD, 1) + ' m' : '') + '）';
         }else{ dt = sp; parts.shoot = sp; kind = '同靶'; }
         if(emptyReload){ dt += emptyReload; parts.wait += emptyReload; why = '彈匣打空，定點換匣'; }
         mag--;
@@ -937,15 +1099,21 @@ function drawPlanOverlay(ctx, toS){
       label(ctx, '第 ' + (j + 1), q[0] - 12, q[1] - 16, '#C8372D'); });
   }
   const start = startObj(), col = '#1F6E8C';
-  const path = (start ? [[start.x, start.y]] : []).concat(plan.stops.map(s => [s.x, s.y]));
+  const path = planWalkPts(plan);
   if(path.length > 1 && pathW(ctx, toS, path)){ ctx.strokeStyle = 'rgba(31,110,140,.8)'; ctx.lineWidth = 2.5; ctx.stroke(); }
   let n = 0;
+  const dd = downDir();
   plan.stops.forEach((st, k) => {
     const q0 = toS(st.x, st.y); if(!q0) return;
+    const vis = stopVisMemo(st);
     st.targets.forEach(asg => {
       const o = getObj(asg.id), q = o && toS(o.x, o.y); if(!q) return;
       n++;
-      ctx.beginPath(); ctx.moveTo(q0[0], q0[1]); ctx.lineTo(q[0], q[1]); ctx.strokeStyle = 'rgba(31,110,140,.3)'; ctx.lineWidth = 1; ctx.stroke();
+      // sight line from where the eye really is (leaning out when the shot needs it); red dashes when it cannot be shot
+      const r = vis[asg.id], lat = r && r.lean || 0, e = toS(st.x + dd[1]*lat, st.y - dd[0]*lat) || q0, bad = visProblem(r) && !(mechMoves(o) && r && r.status === 'none');
+      ctx.beginPath(); ctx.moveTo(e[0], e[1]); ctx.lineTo(q[0], q[1]);
+      if(bad){ ctx.setLineDash([5, 4]); ctx.strokeStyle = 'rgba(200,55,45,.85)'; ctx.lineWidth = 1.5; } else { ctx.strokeStyle = 'rgba(31,110,140,.3)'; ctx.lineWidth = 1; }
+      ctx.stroke(); ctx.setLineDash([]);
       ctx.beginPath(); ctx.arc(q[0] + 12, q[1] - 14, 8, 0, Math.PI*2); ctx.fillStyle = col; ctx.fill();
       ctx.fillStyle = '#fff'; ctx.font = '700 10px sans-serif'; ctx.fillText(String(n), q[0] + 12 - (n > 9 ? 6 : 3), q[1] - 10);
     });

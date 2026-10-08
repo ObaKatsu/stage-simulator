@@ -332,7 +332,7 @@ function t3PoseShooter(F, t){
   if(mv){
     const k2 = RP.stops.indexOf(mv), prevSit = k2 > 0 && RP.stops[k2 - 1].stance === 'sit', sinceDep = t - mv.dep;
     const standUp = prevSit ? ((seatAt(mv.from[0], mv.from[1]) || {}).straddle ? (T.dismount || 1) : (T.standUp || 0.6)) : 0;
-    const dist = Math.hypot(mv.to[0] - mv.from[0], mv.to[1] - mv.from[1]), v = dist / Math.max(0.1, mv.arr - mv.dep);
+    const dist = mv.path ? mv.path.len : Math.hypot(mv.to[0] - mv.from[0], mv.to[1] - mv.from[1]), v = dist / Math.max(0.1, mv.arr - mv.dep);
     if(prevSit && sinceDep < standUp){ use('Sitting_Exit', null, sinceDep / standUp * dur('Sitting_Exit')); fullBody = true; }
     else if(k2 === 0 && S.rise && t < S.rise){ use('Sitting_Exit', null, t / S.rise * dur('Sitting_Exit')); fullBody = true; }
     else {
@@ -342,9 +342,9 @@ function t3PoseShooter(F, t){
       else loop('Jog_Fwd_Loop', 'low', sinceDep * 1.1);
       if(!tn){ if(t < S.loadEnd && startUpper()); else if(rl) use('Pistol_Reload', 'up', (t - rl.a) / Math.max(0.3, rl.b - rl.a) * dur('Pistol_Reload')); else loop('Pistol_Idle_Loop', 'up', t); }
     }
-    dir = [mv.to[0] - mv.from[0], mv.to[1] - mv.from[1]];
+    dir = legDir(mv, t);
   }else{
-    const st = k >= 0 ? RP.stops[k].stance : 'stand', S0 = k >= 0 ? RP.stops[k] : null, sinceArr = S0 ? t - S0.arr : 0;
+    const st = k >= 0 ? (figAdj(t).key || RP.stops[k].stance) : 'stand', S0 = k >= 0 ? RP.stops[k] : null, sinceArr = S0 ? t - S0.arr : 0;
     const firstAt = k >= 0 ? shots.find(x => x.stop === k) : null, opening = firstAt && /開窗/.test(firstAt.why || '') && sinceArr >= 0 && sinceArr < (T.windowOpen || 0.5);
     const sitting = seat && st === 'sit' && k >= 0 && !(k === 0 && stage.startCond.pose && stage.startCond.pose !== 'stand') && !(k > 0 && RP.stops[k - 1].stance === 'sit' && Math.hypot(RP.stops[k-1].to[0] - S0.to[0], RP.stops[k-1].to[1] - S0.to[1]) < 0.05) && sinceArr >= 0 && sinceArr < (T.sitDown || 0.6);
     prone = st === 'prone' && !seat; straddle = !!(seat && seat.straddle);

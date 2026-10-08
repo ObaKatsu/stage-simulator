@@ -139,7 +139,7 @@ function drawReloadMarks(ctx, toS){
   R.reloadLog.forEach(r => {
     const st = plan.stops[r.stop]; if(!st) return;
     const pv = r.stop === 0 ? (start ? [start.x, start.y] : [st.x, st.y]) : [plan.stops[r.stop - 1].x, plan.stops[r.stop - 1].y];
-    const at = r.forced || !r.moving ? [st.x, st.y] : [(pv[0] + st.x) / 2, (pv[1] + st.y) / 2];
+    const at = r.forced || !r.moving ? [st.x, st.y] : (w => pathAt(w, w.len / 2).p)(walkPath(pv, [st.x, st.y]));
     const q = toS(at[0], at[1]); if(!q) return;
     const txt = r.forced || !r.moving ? '換匣 ' + fmt(r.extra, 1) + 's' : r.extra > 0.005 ? '換匣 +' + fmt(r.extra, 1) + 's' : '換匣';
     ctx.save(); ctx.font = '600 12px system-ui, sans-serif';
